@@ -1,0 +1,344 @@
+package recipes
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestRegistry_KnownRecipes(t *testing.T) {
+	want := []string{"vllm", "ollama", "vllm-omni", "infinity", "triton", "inferia-diffusion"}
+	for _, name := range want {
+		if _, err := Get(name); err != nil {
+			t.Errorf("Get(%q): %v", name, err)
+		}
+	}
+}
+
+func TestRegistry_UnknownRecipe(t *testing.T) {
+	if _, err := Get("nope"); err == nil {
+		t.Errorf("expected error for unknown recipe")
+	}
+	if _, err := Get(""); err == nil {
+		t.Errorf("expected error for empty recipe")
+	}
+}
+
+func TestRegistry_Names_Sorted(t *testing.T) {
+	names := Names()
+	if len(names) != 6 {
+		t.Fatalf("got %d names", len(names))
+	}
+	prev := ""
+	for _, n := range names {
+		if n < prev {
+			t.Errorf("names not sorted: %v", names)
+			break
+		}
+		prev = n
+	}
+}
+
+// Plan covers the user-controllable inputs that flow into BuildPlan: model URI,
+// config map, GPU indices, host bind port, deployment id.
+
+func TestBuildPlan_VLLM_Defaults(t *testing.T) {
+	r, _ := Get("vllm")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "dep-1",
+		ArtifactURI:  "hf://meta-llama/Llama-3.1-8B-Instruct",
+		Config:       nil,
+		GPUIndices:   []int{0},
+		HostPort:     19000,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(plan.Image, "vllm-openai") {
+		t.Errorf("image: %q", plan.Image)
+	}
+	if plan.ContainerPort != 8000 && plan.ContainerPort != 9000 {
+		t.Errorf("port: %d", plan.ContainerPort)
+	}
+	if plan.HostPort != 19000 {
+		t.Errorf("HostPort: %d", plan.HostPort)
+	}
+	if plan.ReadyPath == "" {
+		t.Errorf("ReadyPath empty")
+	}
+	if plan.ContainerName == "" || !strings.Contains(plan.ContainerName, "dep-1") {
+		t.Errorf("ContainerName: %q", plan.ContainerName)
+	}
+	// Model id should appear in the command somewhere (as the model arg).
+	joined := strings.Join(plan.Cmd, " ")
+	if !strings.Contains(joined, "meta-llama/Llama-3.1-8B-Instruct") {
+		t.Errorf("cmd missing model: %v", plan.Cmd)
+	}
+}
+
+func TestBuildPlan_Ollama_StripsHFScheme(t *testing.T) {
+	r, _ := Get("ollama")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "dep-2",
+		ArtifactURI:  "hf://llama3",
+		GPUIndices:   []int{0},
+		HostPort:     11434,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	// The model id must appear somewhere (cmd or env) so the runtime layer can
+	// pull it after the container is ready, and it must not carry the URI scheme.
+	allText := strings.Join(plan.Cmd, " ")
+	for k, v := range plan.Env {
+		allText += " " + k + "=" + v
+	}
+	if strings.Contains(allText, "hf://") {
+		t.Errorf("scheme leaked into plan: %v / %v", plan.Cmd, plan.Env)
+	}
+	if !strings.Contains(allText, "llama3") {
+		t.Errorf("model id missing from plan: %v / %v", plan.Cmd, plan.Env)
+	}
+}
+
+// Security: artifact URIs go into docker invocations. We accept only safe
+// schemes and reject any control/metacharacters.
+
+func TestBuildPlan_RejectsBadURISchemes(t *testing.T) {
+	r, _ := Get("vllm")
+	bad := []string{
+		"file:///etc/passwd",
+		"javascript:alert(1)",
+		"data:text/plain,abc",
+		"",
+		"   ",
+		"no-scheme-here",
+		"ftp://example.com/model",
+	}
+	for _, uri := range bad {
+		_, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d",
+			ArtifactURI:  uri,
+			GPUIndices:   []int{0},
+			HostPort:     1234,
+		})
+		if err == nil {
+			t.Errorf("expected reject for %q", uri)
+		}
+	}
+}
+
+func TestBuildPlan_AcceptsAllowedURISchemes(t *testing.T) {
+	r, _ := Get("vllm")
+	good := []string{
+		"s3://bucket/path",
+		"gs://bucket/path",
+		"hf://org/model",
+		"http://example.com/m",
+		"https://example.com/m",
+		"oci://registry/image:tag",
+	}
+	for _, uri := range good {
+		if _, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d",
+			ArtifactURI:  uri,
+			GPUIndices:   []int{0},
+			HostPort:     1234,
+		}); err != nil {
+			t.Errorf("expected accept for %q: %v", uri, err)
+		}
+	}
+}
+
+func TestBuildPlan_RejectsURIWithMetachars(t *testing.T) {
+	r, _ := Get("vllm")
+	for _, uri := range []string{
+		"hf://model;rm -rf /",
+		"hf://model`whoami`",
+		"hf://model$(id)",
+		"hf://model\nrm",
+		"hf://model|cat",
+	} {
+		if _, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d",
+			ArtifactURI:  uri,
+			GPUIndices:   []int{0},
+			HostPort:     1234,
+		}); err == nil {
+			t.Errorf("expected reject for %q", uri)
+		}
+	}
+}
+
+func TestBuildPlan_ConfigSanitisation(t *testing.T) {
+	r, _ := Get("vllm")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{0},
+		HostPort:     1234,
+		Config: map[string]any{
+			"tensor_parallel_size":   2,
+			"gpu_memory_utilization": 0.9,
+			"dtype":                  "bfloat16",
+			"max_model_len":          4096,
+
+			// Disallowed: should be silently dropped.
+			"arbitrary_key":  "DROP",
+			"trust_anything": true,
+
+			// Wrong type for allowed key: should be dropped.
+			"max_num_seqs": []int{1, 2, 3},
+
+			// Nested dict for allowed key: dropped.
+			"quantization": map[string]string{"k": "v"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	joined := strings.Join(plan.Cmd, " ")
+	if strings.Contains(joined, "arbitrary_key") || strings.Contains(joined, "DROP") {
+		t.Errorf("disallowed config leaked: %v", plan.Cmd)
+	}
+	if !strings.Contains(joined, "tensor-parallel-size") && !strings.Contains(joined, "tensor_parallel_size") {
+		t.Errorf("allowed config missing: %v", plan.Cmd)
+	}
+}
+
+func TestBuildPlan_OversizedConfigRejected(t *testing.T) {
+	r, _ := Get("vllm")
+	cfg := map[string]any{}
+	for i := 0; i < 65; i++ {
+		cfg["k_"+strings.Repeat("x", i)] = i
+	}
+	_, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{0},
+		HostPort:     1234,
+		Config:       cfg,
+	})
+	if err == nil {
+		t.Errorf("expected error for >64-key config")
+	}
+}
+
+func TestBuildPlan_LongKeyRejected(t *testing.T) {
+	r, _ := Get("vllm")
+	_, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{0},
+		HostPort:     1234,
+		Config:       map[string]any{strings.Repeat("k", 129): 1},
+	})
+	if err == nil {
+		t.Errorf("expected error for >128-byte key")
+	}
+}
+
+func TestBuildPlan_NoGPUIndices(t *testing.T) {
+	r, _ := Get("vllm")
+	_, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   nil,
+		HostPort:     1234,
+	})
+	if err == nil {
+		t.Errorf("vllm expects ≥1 GPU; nil should error")
+	}
+}
+
+func TestBuildPlan_NegativeGPUIndexRejected(t *testing.T) {
+	r, _ := Get("vllm")
+	_, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{-1},
+		HostPort:     1234,
+	})
+	if err == nil {
+		t.Errorf("negative GPU index must reject")
+	}
+}
+
+func TestBuildPlan_DeploymentIDRequired(t *testing.T) {
+	r, _ := Get("vllm")
+	if _, err := r.BuildPlan(BuildInput{
+		ArtifactURI: "hf://org/m",
+		GPUIndices:  []int{0},
+		HostPort:    1234,
+	}); err == nil {
+		t.Errorf("expected error for missing DeploymentID")
+	}
+}
+
+func TestBuildPlan_AllRecipesProduceValidPlan(t *testing.T) {
+	// Each shipped recipe must roundtrip a minimal input without error.
+	for _, name := range Names() {
+		t.Run(name, func(t *testing.T) {
+			r, _ := Get(name)
+			plan, err := r.BuildPlan(BuildInput{
+				DeploymentID: "d-" + name,
+				ArtifactURI:  "hf://org/m",
+				GPUIndices:   []int{0},
+				HostPort:     20000,
+			})
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			if plan.Image == "" {
+				t.Errorf("Image empty")
+			}
+			if plan.ContainerPort == 0 {
+				t.Errorf("ContainerPort == 0")
+			}
+			if plan.ReadyPath == "" {
+				t.Errorf("ReadyPath empty")
+			}
+			if plan.ContainerName == "" {
+				t.Errorf("ContainerName empty")
+			}
+		})
+	}
+}
+
+func TestBuildPlan_EnvVarsHonoured(t *testing.T) {
+	// HF_TOKEN provided via Env propagates into the container env.
+	r, _ := Get("vllm")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d",
+		ArtifactURI:  "hf://org/m",
+		GPUIndices:   []int{0},
+		HostPort:     1234,
+		Env:          map[string]string{"HF_TOKEN": "secret123"},
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if plan.Env["HF_TOKEN"] != "secret123" {
+		t.Errorf("HF_TOKEN missing from plan env")
+	}
+}
+
+func TestBuildPlan_HostPortRange(t *testing.T) {
+	r, _ := Get("vllm")
+	for _, p := range []int{0, -1, 65536, 99999} {
+		if _, err := r.BuildPlan(BuildInput{
+			DeploymentID: "d", ArtifactURI: "hf://o/m", GPUIndices: []int{0}, HostPort: p,
+		}); err == nil {
+			t.Errorf("expected error for HostPort=%d", p)
+		}
+	}
+	if _, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d", ArtifactURI: "hf://o/m", GPUIndices: []int{0}, HostPort: 1,
+	}); err != nil {
+		t.Errorf("expected ok for HostPort=1: %v", err)
+	}
+	if _, err := r.BuildPlan(BuildInput{
+		DeploymentID: "d", ArtifactURI: "hf://o/m", GPUIndices: []int{0}, HostPort: 65535,
+	}); err != nil {
+		t.Errorf("expected ok for HostPort=65535: %v", err)
+	}
+}
