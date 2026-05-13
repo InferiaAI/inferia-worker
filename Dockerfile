@@ -17,25 +17,24 @@ ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 # ----- runtime -----
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:latest
 
 # The worker needs:
-#   - read access to /var/run/docker.sock (mounted at runtime)
+#   - read access to /var/run/docker.sock (mounted at runtime; the socket on
+#     the host is typically owned by root:docker, gid varies by distro)
 #   - write access to /var/lib/inferia-worker for the persisted token
 #
-# Distroless static is fine because the worker is statically linked. We do not
-# include nvidia-smi here; telemetry/gpu.go tolerates its absence and reports
-# zero GPUs in that case. For GPU-equipped hosts, host-mounted nvidia-smi is
-# usually accessible via the docker socket integration, not from inside the
-# worker container.
+# We run as root so the worker can read the docker.sock without operators
+# having to figure out the host docker-group GID. This is acceptable because
+# the worker container's sole purpose is to manage other Docker containers —
+# anything that compromises the worker already has full docker socket access.
+# Use Docker's userns-remap or rootless Docker to get host-side isolation.
 
 WORKDIR /app
 COPY --from=builder /out/worker /app/worker
 
 # Token persistence volume mount target.
 VOLUME ["/var/lib/inferia-worker"]
-
-USER nonroot:nonroot
 
 EXPOSE 8080
 

@@ -19,8 +19,8 @@ This document is **kept in sync with the codebase as it grows**. When a new pack
 | `internal/inference/` | Fiber proxy for `/v1/*` to local model containers. |
 | `internal/healthz/` | `/healthz` and `/readyz` handlers. |
 | `docs/` | Project docs. `structure.md` (this file) is the living architecture map. |
-| `Dockerfile` | Multi-stage build for the worker image. |
-| `docker-compose.yml` | Single-command bring-up on a GPU host. |
+| `Dockerfile` | Multi-stage build for the worker image. Final stage is distroless/static-debian12 (no shell, no nonroot — runs as root so it can read host docker.sock). |
+| `docker-compose.yml` | **Single service.** One container, one binary. The worker connects to whatever `CONTROL_PLANE_URL` points at; no companion process is bundled. |
 | `.env.sample` | All env vars with comments + safe defaults. |
 | `Makefile` | `test`, `test-integration`, `build`, `lint`, `coverage`. |
 
