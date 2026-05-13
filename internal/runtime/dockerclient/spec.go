@@ -1,0 +1,98 @@
+// Package dockerclient wraps the Docker SDK with the narrow surface the worker
+// runtime needs. It also exposes a pure BuildContainerSpec function that
+// translates a recipes.Plan into a host-agnostic ContainerSpec — the SDK calls
+// then turn that into the corresponding container.Config / HostConfig.
+package dockerclient
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+
+	"github.com/inferia/inferia-worker/internal/runtime/recipes"
+)
+
+// ContainerSpec is a wire-format-agnostic description of a container we'd
+// like Docker to run. Keeps the dockerclient testable without importing the
+// SDK types into tests.
+type ContainerSpec struct {
+	Name            string
+	Image           string
+	Cmd             []string
+	Env             map[string]string
+	PortBinding     PortBinding
+	NetworkName     string
+	RestartPolicy   string
+	Labels          map[string]string
+	GPUDeviceIDs    []string
+	GPUCapabilities [][]string // capability groups; each group is ANDed, groups are ORed
+}
+
+// PortBinding describes one host:container port mapping. We always bind to
+// 127.0.0.1 so the model server is reachable only by the worker proxy.
+type PortBinding struct {
+	HostIP        string
+	HostPort      string
+	ContainerPort string
+}
+
+// BuildContainerSpec validates the plan and returns the spec.
+func BuildContainerSpec(p recipes.Plan, networkName string) (*ContainerSpec, error) {
+	if p.Image == "" {
+		return nil, errors.New("plan.Image is required")
+	}
+	if p.ContainerName == "" {
+		return nil, errors.New("plan.ContainerName is required")
+	}
+	if p.ContainerPort <= 0 {
+		return nil, errors.New("plan.ContainerPort must be > 0")
+	}
+	if p.HostPort <= 0 {
+		return nil, errors.New("plan.HostPort must be > 0")
+	}
+
+	deviceIDs := make([]string, 0, len(p.GPUIndices))
+	for _, i := range p.GPUIndices {
+		deviceIDs = append(deviceIDs, strconv.Itoa(i))
+	}
+
+	labels := map[string]string{
+		"inferia.managed_by":    "inferia-worker",
+		"inferia.deployment_id": labelDeploymentID(p.ContainerName),
+	}
+
+	return &ContainerSpec{
+		Name:  p.ContainerName,
+		Image: p.Image,
+		Cmd:   p.Cmd,
+		Env:   p.Env,
+		PortBinding: PortBinding{
+			HostIP:        "127.0.0.1",
+			HostPort:      strconv.Itoa(p.HostPort),
+			ContainerPort: fmt.Sprintf("%d/tcp", p.ContainerPort),
+		},
+		NetworkName:     networkName,
+		RestartPolicy:   "no",
+		Labels:          labels,
+		GPUDeviceIDs:    deviceIDs,
+		GPUCapabilities: [][]string{{"gpu"}},
+	}, nil
+}
+
+// labelDeploymentID extracts a stable deployment id from the container name
+// (which the recipe builds as <prefix>-<deploymentID>). If the prefix scheme
+// changes, we fall back to the full name.
+func labelDeploymentID(containerName string) string {
+	// Container names look like inferia-vllm-<dep-id>; we strip the prefix
+	// "inferia-<recipe>-".
+	prefixes := []string{
+		"inferia-vllm-", "inferia-ollama-", "inferia-infinity-",
+		"inferia-triton-", "inferia-diff-",
+	}
+	for _, p := range prefixes {
+		if len(containerName) > len(p) && containerName[:len(p)] == p {
+			return containerName[len(p):]
+		}
+	}
+	return containerName
+}

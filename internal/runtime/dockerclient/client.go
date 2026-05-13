@@ -1,0 +1,191 @@
+package dockerclient
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
+)
+
+// Client is the narrow surface the runtime needs from docker. Implemented by
+// dockerEngine (real SDK) and by the fake in fake/fake.go for tests.
+type Client interface {
+	Ping(ctx context.Context) error
+	EnsureNetwork(ctx context.Context, name string) error
+	Pull(ctx context.Context, image string) error
+	Create(ctx context.Context, spec *ContainerSpec) (containerID string, err error)
+	Start(ctx context.Context, containerID string) error
+	Stop(ctx context.Context, containerID string, timeoutSeconds int) error
+	Remove(ctx context.Context, containerID string) error
+	Inspect(ctx context.Context, containerID string) (*Inspect, error)
+	Logs(ctx context.Context, containerID string, lines int) ([]byte, error)
+}
+
+// Inspect is the subset of container state we read.
+type Inspect struct {
+	ID       string
+	Running  bool
+	ExitCode int
+	Status   string // running | exited | created | dead
+}
+
+// NewEngine returns a Client backed by the real Docker SDK.
+func NewEngine(dockerHost string) (Client, error) {
+	c, err := client.NewClientWithOpts(
+		client.WithHost(dockerHost),
+		client.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &dockerEngine{cli: c}, nil
+}
+
+type dockerEngine struct {
+	cli *client.Client
+}
+
+func (e *dockerEngine) Ping(ctx context.Context) error {
+	_, err := e.cli.Ping(ctx)
+	return err
+}
+
+func (e *dockerEngine) EnsureNetwork(ctx context.Context, name string) error {
+	nets, err := e.cli.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for _, n := range nets {
+		if n.Name == name {
+			return nil
+		}
+	}
+	_, err = e.cli.NetworkCreate(ctx, name, network.CreateOptions{
+		Driver: "bridge",
+		Labels: map[string]string{"inferia.managed_by": "inferia-worker"},
+	})
+	return err
+}
+
+func (e *dockerEngine) Pull(ctx context.Context, img string) error {
+	rc, err := e.cli.ImagePull(ctx, img, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	// Drain progress JSON so the pull actually completes.
+	_, err = io.Copy(io.Discard, rc)
+	return err
+}
+
+func (e *dockerEngine) Create(ctx context.Context, spec *ContainerSpec) (string, error) {
+	containerPort, err := nat.NewPort("tcp", trimAfter(spec.PortBinding.ContainerPort, '/'))
+	if err != nil {
+		return "", fmt.Errorf("port parse: %w", err)
+	}
+
+	exposed := nat.PortSet{containerPort: struct{}{}}
+	portMap := nat.PortMap{
+		containerPort: []nat.PortBinding{
+			{HostIP: spec.PortBinding.HostIP, HostPort: spec.PortBinding.HostPort},
+		},
+	}
+
+	envSlice := make([]string, 0, len(spec.Env))
+	for k, v := range spec.Env {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
+	cfg := &container.Config{
+		Image:        spec.Image,
+		Cmd:          spec.Cmd,
+		Env:          envSlice,
+		ExposedPorts: exposed,
+		Labels:       spec.Labels,
+	}
+
+	hostCfg := &container.HostConfig{
+		PortBindings:  portMap,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)},
+	}
+	if len(spec.GPUDeviceIDs) > 0 {
+		hostCfg.Resources.DeviceRequests = []container.DeviceRequest{
+			{
+				Driver:       "nvidia",
+				DeviceIDs:    spec.GPUDeviceIDs,
+				Capabilities: spec.GPUCapabilities,
+			},
+		}
+	}
+
+	netCfg := &network.NetworkingConfig{
+		EndpointsConfig: map[string]*network.EndpointSettings{
+			spec.NetworkName: {NetworkID: spec.NetworkName},
+		},
+	}
+
+	resp, err := e.cli.ContainerCreate(ctx, cfg, hostCfg, netCfg, nil, spec.Name)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+func (e *dockerEngine) Start(ctx context.Context, id string) error {
+	return e.cli.ContainerStart(ctx, id, container.StartOptions{})
+}
+
+func (e *dockerEngine) Stop(ctx context.Context, id string, timeoutSeconds int) error {
+	t := timeoutSeconds
+	return e.cli.ContainerStop(ctx, id, container.StopOptions{Timeout: &t})
+}
+
+func (e *dockerEngine) Remove(ctx context.Context, id string) error {
+	return e.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+}
+
+func (e *dockerEngine) Inspect(ctx context.Context, id string) (*Inspect, error) {
+	info, err := e.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	state := info.State
+	return &Inspect{
+		ID:       info.ID,
+		Running:  state.Running,
+		ExitCode: state.ExitCode,
+		Status:   state.Status,
+	}, nil
+}
+
+func (e *dockerEngine) Logs(ctx context.Context, id string, lines int) ([]byte, error) {
+	rc, err := e.cli.ContainerLogs(ctx, id, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       fmt.Sprintf("%d", lines),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func trimAfter(s string, sep byte) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// Ensure encoding/json stays imported (used for debug helpers; keep dep stable
+// across edits).
+var _ = json.Marshal
