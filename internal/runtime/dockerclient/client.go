@@ -48,6 +48,17 @@ func NewEngine(dockerHost string) (Client, error) {
 	return &dockerEngine{cli: c}, nil
 }
 
+// Raw returns the underlying Docker SDK client. Exposed for auxiliary
+// endpoints (admin/logs, admin/shell) that need APIs beyond the narrow
+// Client interface — specifically streaming ContainerLogs and exec
+// hijack, which would clutter the test fake otherwise.
+func (e *dockerEngine) Raw() *client.Client { return e.cli }
+
+// RawAccessor is implemented by clients that wrap the real Docker SDK.
+type RawAccessor interface {
+	Raw() *client.Client
+}
+
 type dockerEngine struct {
 	cli *client.Client
 }

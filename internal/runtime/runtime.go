@@ -122,6 +122,19 @@ func (r *Runtime) EndpointURL(deploymentID string) string {
 	return d.endpointURL
 }
 
+// ContainerForDeployment returns the docker container ID currently running
+// the given deployment, or "" if no such container exists. Used by the
+// admin logs / shell endpoints to target the right container.
+func (r *Runtime) ContainerForDeployment(deploymentID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deployments[deploymentID]
+	if !ok {
+		return ""
+	}
+	return d.containerID
+}
+
 // LoadModel pulls the image, runs the container, and waits for readiness.
 // Idempotent: a duplicate call for the same deploymentID either waits for the
 // first to finish and returns its result, or — if already running — returns
