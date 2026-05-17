@@ -13,10 +13,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gofiber/fiber/v2"
@@ -62,10 +64,13 @@ func websocketUpgrade(c *fiber.Ctx) error {
 // resolveContainer picks the container to operate on. Preference:
 //  1. query param `container` (raw container ID — operator override)
 //  2. query param `deployment` resolved through the runtime
-//  3. the first loaded deployment when the request omits both
+//  3. query param `deployment` resolved via docker ps (recovers after a
+//     worker restart that drops the runtime's in-memory deployment map
+//     while the model container is still up)
+//  4. the first loaded deployment when the request omits both
 //
 // Returns ("", error string) if nothing can be resolved.
-func resolveContainer(c *websocket.Conn, rt Runtime) (string, string) {
+func resolveContainer(c *websocket.Conn, rt Runtime, docker *client.Client) (string, string) {
 	if raw := c.Query("container"); raw != "" {
 		return raw, ""
 	}
@@ -73,15 +78,70 @@ func resolveContainer(c *websocket.Conn, rt Runtime) (string, string) {
 	if depID == "" {
 		loaded := rt.LoadedDeployments()
 		if len(loaded) == 0 {
+			// Last-ditch fallback: pick the most recent inferia-managed
+			// container the worker has spawned (helps when the runtime
+			// registry is empty post-restart and no deployment id was
+			// provided).
+			if cid := mostRecentInferiaContainer(docker); cid != "" {
+				return cid, ""
+			}
 			return "", "no active deployment on this worker"
 		}
 		depID = loaded[0]
 	}
-	cid := rt.ContainerForDeployment(depID)
-	if cid == "" {
-		return "", fmt.Sprintf("deployment %q has no running container", depID)
+	if cid := rt.ContainerForDeployment(depID); cid != "" {
+		return cid, ""
 	}
-	return cid, ""
+	// Docker fallback: containers are named like inferia-<recipe>-<depID>.
+	if cid := containerByDeploymentID(docker, depID); cid != "" {
+		return cid, ""
+	}
+	return "", fmt.Sprintf("deployment %q has no running container", depID)
+}
+
+// containerByDeploymentID searches running containers for one whose name
+// ends with the deployment id (the worker names them
+// `inferia-<recipe>-<deploymentID>`).
+func containerByDeploymentID(docker *client.Client, depID string) string {
+	if docker == nil || depID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	list, err := docker.ContainerList(ctx, container.ListOptions{
+		All:     false,
+		Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: depID}),
+	})
+	if err != nil || len(list) == 0 {
+		return ""
+	}
+	for _, c := range list {
+		for _, n := range c.Names {
+			if strings.Contains(n, depID) {
+				return c.ID
+			}
+		}
+	}
+	return list[0].ID
+}
+
+// mostRecentInferiaContainer returns the newest running container whose
+// name carries the `inferia-` prefix the worker uses for model launches.
+// Used as a last-ditch fallback when the request omits a deployment id.
+func mostRecentInferiaContainer(docker *client.Client) string {
+	if docker == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	list, err := docker.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(filters.KeyValuePair{Key: "name", Value: "inferia-"}),
+	})
+	if err != nil || len(list) == 0 {
+		return ""
+	}
+	// docker returns newest first by default.
+	return list[0].ID
 }
 
 func sendErr(c *websocket.Conn, detail string) {
@@ -92,7 +152,7 @@ func sendErr(c *websocket.Conn, detail string) {
 // --- /v1/logs ---------------------------------------------------------------
 
 func handleLogs(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
-	containerID, errMsg := resolveContainer(c, rt)
+	containerID, errMsg := resolveContainer(c, rt, dockerCli)
 	if errMsg != "" {
 		sendErr(c, errMsg)
 		return
@@ -195,7 +255,7 @@ func forwardLines(r io.Reader, stream string, fn func(stream, line string)) {
 // --- /v1/shell --------------------------------------------------------------
 
 func handleShell(c *websocket.Conn, dockerCli *client.Client, rt Runtime) {
-	containerID, errMsg := resolveContainer(c, rt)
+	containerID, errMsg := resolveContainer(c, rt, dockerCli)
 	if errMsg != "" {
 		sendErr(c, errMsg)
 		return
