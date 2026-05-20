@@ -6,6 +6,7 @@ package cloudenv
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -35,6 +36,11 @@ const (
 	maxFieldLen     = 128
 )
 
+// cacheOnce and cached hold the singleton result of the first Detect() call.
+// Tests that exercise Detect() must reset these before running:
+//
+//	cacheOnce = sync.Once{}
+//	cached = RuntimeInfo{}
 var (
 	cacheOnce sync.Once
 	cached    RuntimeInfo
@@ -98,9 +104,11 @@ func probeIMDS() (RuntimeInfo, bool) {
 	if tokResp.StatusCode != http.StatusOK {
 		return RuntimeInfo{}, false
 	}
-	tokBuf := make([]byte, 4096)
-	n, _ := tokResp.Body.Read(tokBuf)
-	token := string(tokBuf[:n])
+	tokBytes, err := io.ReadAll(io.LimitReader(tokResp.Body, 1024))
+	if err != nil {
+		return RuntimeInfo{}, false
+	}
+	token := string(tokBytes)
 
 	// Step 2: GET identity document.
 	docReq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/latest/dynamic/instance-identity/document", nil)
@@ -118,14 +126,19 @@ func probeIMDS() (RuntimeInfo, bool) {
 	}
 	// Bound the body to defend against pathological responses.
 	const maxBody = 64 * 1024
-	docBuf := make([]byte, maxBody)
-	bn, _ := docResp.Body.Read(docBuf)
+	docBytes, err := io.ReadAll(io.LimitReader(docResp.Body, maxBody+1))
+	if err != nil {
+		return RuntimeInfo{}, false
+	}
+	if len(docBytes) > maxBody {
+		return RuntimeInfo{}, false
+	}
 	var doc struct {
 		InstanceID       string `json:"instanceId"`
 		Region           string `json:"region"`
 		AvailabilityZone string `json:"availabilityZone"`
 	}
-	if err := json.Unmarshal(docBuf[:bn], &doc); err != nil {
+	if err := json.Unmarshal(docBytes, &doc); err != nil {
 		return RuntimeInfo{}, false
 	}
 	return RuntimeInfo{
