@@ -50,7 +50,7 @@ type RegisterResponse struct {
 // The worker echoes cloud-env fields back so the CP can refresh
 // compute_inventory.labels on every reconnect, not just on first register.
 type HelloBody struct {
-	ServerTime       time.Time `json:"server_time,omitempty"`
+	ServerTime       *time.Time `json:"server_time,omitempty"`
 	ChannelID        string    `json:"channel_id,omitempty"`
 	RuntimeEnv       string    `json:"runtime_env,omitempty"`
 	InstanceID       string    `json:"instance_id,omitempty"`

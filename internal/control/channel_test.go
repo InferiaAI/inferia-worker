@@ -321,3 +321,24 @@ func TestHello_IncludesCloudEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestHello_OmitsCloudEnvWhenLocal(t *testing.T) {
+	// A zero HelloBody (worker running locally with no cloud-env fields set)
+	// must not emit runtime_env, instance_id, region, availability_zone, or
+	// server_time. server_time uses *time.Time so nil is omitempty-friendly.
+	body := HelloBody{}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, unwanted := range []string{`"runtime_env"`, `"instance_id"`, `"region"`, `"availability_zone"`} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("expected %s omitted, got %s", unwanted, s)
+		}
+	}
+	// server_time must also be omitted — nil *time.Time satisfies omitempty.
+	if strings.Contains(s, `"server_time"`) {
+		t.Errorf("server_time should be omitted on zero HelloBody, got %s", s)
+	}
+}
