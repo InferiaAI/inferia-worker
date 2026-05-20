@@ -13,11 +13,12 @@ import (
 
 // BuildRegisterInput holds all the caller-supplied values for a register POST.
 type BuildRegisterInput struct {
-	NodeName     string
-	PoolID       string
-	Allocatable  map[string]string
-	AdvertiseURL string
-	Runtime      cloudenv.RuntimeInfo
+	NodeName       string
+	PoolID         string
+	Allocatable    map[string]string
+	AdvertiseURL   string
+	Runtime        cloudenv.RuntimeInfo
+	BootstrapToken string
 }
 
 // BuildRegisterRequest constructs a RegisterRequest from the given input,
@@ -33,6 +34,7 @@ func BuildRegisterRequest(in BuildRegisterInput) RegisterRequest {
 		InstanceID:       in.Runtime.InstanceID,
 		Region:           in.Runtime.Region,
 		AvailabilityZone: in.Runtime.AvailabilityZone,
+		BootstrapToken:   in.BootstrapToken,
 	}
 }
 

@@ -150,9 +150,34 @@ func TestRegisterRequest_OmitsCloudEnvWhenLocal(t *testing.T) {
 	if strings.Contains(s, "instance_id") || strings.Contains(s, "region") || strings.Contains(s, "availability_zone") {
 		t.Errorf("local runtime should omit cloud-env fields: %s", s)
 	}
-	// runtime_env "local" is fine to include OR omit; either is acceptable —
-	// pin to "include" so the CP always has the field.
+	// runtime_env is always serialized because Kind=KindLocal is the non-empty
+	// string "local" (omitempty drops empty strings, not specific values).
 	if !strings.Contains(s, `"runtime_env":"local"`) {
 		t.Errorf("runtime_env=local should be present: %s", s)
+	}
+}
+
+func TestRegisterRequest_IncludesBootstrapToken(t *testing.T) {
+	req := BuildRegisterRequest(BuildRegisterInput{
+		NodeName:       "node-1",
+		PoolID:         "pool-x",
+		Allocatable:    map[string]string{"cpu": "1"},
+		BootstrapToken: "tok-xyz",
+	})
+	data, _ := json.Marshal(req)
+	if !strings.Contains(string(data), `"bootstrap_token":"tok-xyz"`) {
+		t.Errorf("missing bootstrap_token in %s", data)
+	}
+}
+
+func TestRegisterRequest_OmitsBootstrapTokenWhenEmpty(t *testing.T) {
+	req := BuildRegisterRequest(BuildRegisterInput{
+		NodeName:    "node-1",
+		PoolID:      "pool-x",
+		Allocatable: map[string]string{"cpu": "1"},
+	})
+	data, _ := json.Marshal(req)
+	if strings.Contains(string(data), "bootstrap_token") {
+		t.Errorf("bootstrap_token should be omitted when empty: %s", data)
 	}
 }
