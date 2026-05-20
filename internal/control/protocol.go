@@ -28,10 +28,15 @@ type Envelope struct {
 
 // RegisterRequest is the bootstrap-time POST body.
 type RegisterRequest struct {
-	NodeName     string            `json:"node_name"`
-	PoolID       string            `json:"pool_id"`
-	AdvertiseURL string            `json:"advertise_url"`
-	Allocatable  map[string]string `json:"allocatable"`
+	NodeName         string            `json:"node_name"`
+	PoolID           string            `json:"pool_id"`
+	AdvertiseURL     string            `json:"advertise_url,omitempty"`
+	Allocatable      map[string]string `json:"allocatable"`
+	RuntimeEnv       string            `json:"runtime_env,omitempty"`
+	InstanceID       string            `json:"instance_id,omitempty"`
+	Region           string            `json:"region,omitempty"`
+	AvailabilityZone string            `json:"availability_zone,omitempty"`
+	BootstrapToken   string            `json:"bootstrap_token,omitempty"`
 }
 
 // RegisterResponse is the control plane's reply.
