@@ -48,6 +48,10 @@ func TestDetect_CacheReturnsSameValue(t *testing.T) {
 	// Reset the process-global cache so this test owns the first call.
 	cacheOnce = sync.Once{}
 	cached = RuntimeInfo{}
+	t.Cleanup(func() {
+		cacheOnce = sync.Once{}
+		cached = RuntimeInfo{}
+	})
 
 	t.Setenv("INFERIA_RUNTIME_ENV", "aws-ec2")
 	t.Setenv("INFERIA_INSTANCE_ID", "i-cache-test")
