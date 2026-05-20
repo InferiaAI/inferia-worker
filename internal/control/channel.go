@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/inferia/inferia-worker/internal/cloudenv"
 	"nhooyr.io/websocket"
 )
 
@@ -29,6 +30,11 @@ type Channel struct {
 	HeartbeatInterval time.Duration
 	Dispatcher        Dispatcher
 	DedupTTL          time.Duration
+	// Runtime holds cloud-env facts populated by main.go (via cloudenv.Detect).
+	// sendHello threads them into the outbound Hello frame so the CP can
+	// refresh compute_inventory.labels on every reconnect, not just first
+	// register. Zero value is safe (omitempty fields omit gracefully).
+	Runtime cloudenv.RuntimeInfo
 
 	// internal
 	dedup *dedup
@@ -63,6 +69,23 @@ func (ch *Channel) Run(ctx context.Context) error {
 	}
 }
 
+// sendHello writes a Hello frame to conn, carrying the cloud-env fields from
+// ch.Runtime so the CP can refresh compute_inventory.labels on every reconnect.
+func (ch *Channel) sendHello(ctx context.Context, conn *websocket.Conn) error {
+	env := Envelope{
+		Type: MsgHello,
+		ID:   newID(),
+		TS:   time.Now().UTC().Format(time.RFC3339Nano),
+		Body: HelloBody{
+			RuntimeEnv:       string(ch.Runtime.Kind),
+			InstanceID:       ch.Runtime.InstanceID,
+			Region:           ch.Runtime.Region,
+			AvailabilityZone: ch.Runtime.AvailabilityZone,
+		},
+	}
+	return writeEnvelope(ctx, conn, env)
+}
+
 // connectOnce dials, then runs read/write loops until either side closes.
 func (ch *Channel) connectOnce(ctx context.Context) error {
 	header := http.Header{}
@@ -74,6 +97,11 @@ func (ch *Channel) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// Send Hello immediately after connect so the CP sees cloud-env fields.
+	if err := ch.sendHello(ctx, conn); err != nil {
+		return fmt.Errorf("sendHello: %w", err)
+	}
 
 	// Run read + write concurrently. Cancel when either returns.
 	innerCtx, cancel := context.WithCancel(ctx)

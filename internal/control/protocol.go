@@ -45,10 +45,17 @@ type RegisterResponse struct {
 	WorkerJWT string `json:"worker_jwt"`
 }
 
-// HelloBody is sent by the control plane immediately after WS upgrade.
+// HelloBody is the body of a Hello frame. The control plane sends it to the
+// worker immediately after WS upgrade (carrying server_time and channel_id).
+// The worker echoes cloud-env fields back so the CP can refresh
+// compute_inventory.labels on every reconnect, not just on first register.
 type HelloBody struct {
-	ServerTime time.Time `json:"server_time"`
-	ChannelID  string    `json:"channel_id"`
+	ServerTime       time.Time `json:"server_time,omitempty"`
+	ChannelID        string    `json:"channel_id,omitempty"`
+	RuntimeEnv       string    `json:"runtime_env,omitempty"`
+	InstanceID       string    `json:"instance_id,omitempty"`
+	Region           string    `json:"region,omitempty"`
+	AvailabilityZone string    `json:"availability_zone,omitempty"`
 }
 
 // HeartbeatBody is what the worker sends every interval. used is a map of
