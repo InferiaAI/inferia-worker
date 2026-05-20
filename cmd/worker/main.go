@@ -22,6 +22,7 @@ import (
 
 	"github.com/inferia/inferia-worker/internal/admin"
 	"github.com/inferia/inferia-worker/internal/auth"
+	"github.com/inferia/inferia-worker/internal/cloudenv"
 	"github.com/inferia/inferia-worker/internal/config"
 	"github.com/inferia/inferia-worker/internal/control"
 	"github.com/inferia/inferia-worker/internal/dispatcher"
@@ -75,6 +76,10 @@ func main() {
 		log.Fatalf("ensure docker network: %v", err)
 	}
 
+	runtimeInfo := cloudenv.Detect()
+	log.Printf("cloudenv: kind=%s instance=%s region=%s az=%s",
+		runtimeInfo.Kind, runtimeInfo.InstanceID, runtimeInfo.Region, runtimeInfo.AvailabilityZone)
+
 	// Bootstrap if no token persisted.
 	if tokens.Get() == "" {
 		log.Printf("registering with control plane at %s", cfg.ControlPlaneURL)
@@ -95,16 +100,14 @@ func main() {
 			"gpu":        fmt.Sprintf("%d", len(gpus)),
 			"gpu_models": strings.Join(gpuModels, "|"),
 		}
-		// TODO(Task-5): replace with BuildRegisterRequest once cloudenv.Detect()
-		// is wired in main. Until then this path omits RuntimeEnv / cloud-env
-		// fields and BootstrapToken — intentional, the legacy bootstrap flow
-		// uses Authorization: Bearer for the token.
-		resp, err := b.Register(ctx, control.RegisterRequest{
-			NodeName:     cfg.NodeName,
-			PoolID:       cfg.PoolID,
-			AdvertiseURL: cfg.WorkerAdvertiseURL,
-			Allocatable:  alloc,
-		})
+		resp, err := b.Register(ctx, control.BuildRegisterRequest(control.BuildRegisterInput{
+			NodeName:       cfg.NodeName,
+			PoolID:         cfg.PoolID,
+			AdvertiseURL:   cfg.WorkerAdvertiseURL,
+			Allocatable:    alloc,
+			Runtime:        runtimeInfo,
+			BootstrapToken: cfg.BootstrapToken,
+		}))
 		if err != nil {
 			log.Fatalf("bootstrap: %v", err)
 		}
@@ -157,6 +160,7 @@ func main() {
 		Dispatcher:        disp,
 		DedupTTL:          5 * time.Minute,
 	}
+	ch.Runtime = runtimeInfo
 
 	// Run Fiber + control channel until signal.
 	var wg sync.WaitGroup
