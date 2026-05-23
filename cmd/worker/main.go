@@ -94,11 +94,26 @@ func main() {
 		for _, g := range gpus {
 			gpuModels = append(gpuModels, g.Name)
 		}
+		// The control plane's inventory upsert reads `cpu`, `memory_gb`, and
+		// `gpu` keys (see inventory_repo._upsert_worker_impl). MemInfo.Total
+		// is in bytes; convert to whole GiB (round down).
+		memGB := mem.Total / (1024 * 1024 * 1024)
 		alloc := map[string]string{
 			"cpu":        fmt.Sprintf("%d", cpu.Cores),
-			"memory":     fmt.Sprintf("%d", mem.Total),
+			"memory_gb":  fmt.Sprintf("%d", memGB),
 			"gpu":        fmt.Sprintf("%d", len(gpus)),
 			"gpu_models": strings.Join(gpuModels, "|"),
+		}
+		// Distroless images ship without nvidia-smi, so telemetry.ReadGPU()
+		// always sees zero GPUs even when the nvidia container runtime is
+		// passing devices through. ALLOCATABLE_GPU_OVERRIDE lets operators
+		// declare the GPU count manually; ALLOCATABLE_GPU_MODELS_OVERRIDE
+		// supplies the pipe-joined model-name list for the same case.
+		if v := strings.TrimSpace(os.Getenv("ALLOCATABLE_GPU_OVERRIDE")); v != "" {
+			alloc["gpu"] = v
+		}
+		if v := strings.TrimSpace(os.Getenv("ALLOCATABLE_GPU_MODELS_OVERRIDE")); v != "" {
+			alloc["gpu_models"] = v
 		}
 		resp, err := b.Register(ctx, control.BuildRegisterRequest(control.BuildRegisterInput{
 			NodeName:       cfg.NodeName,
