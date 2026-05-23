@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: 'tag for one-off build (e.g. smoke-1748023456)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -41,6 +46,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=${{ inputs.tag_suffix }},enable=${{ inputs.tag_suffix != '' }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
