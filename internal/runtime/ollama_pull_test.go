@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,5 +47,32 @@ func TestOllamaPull_HappyPath(t *testing.T) {
 	}
 	if called != 1 {
 		t.Errorf("called = %d, want 1", called)
+	}
+}
+
+func TestOllamaPull_StreamingNDJSON(t *testing.T) {
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`{"status":"pulling manifest"}`,
+			`{"status":"downloading","completed":100,"total":1000}`,
+			`{"status":"downloading","completed":800,"total":1000}`,
+			`{"status":"verifying sha256 digest"}`,
+			`{"status":"success"}`,
+			``,
+		} {
+			_, _ = io.WriteString(w, line+"\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	})
+	defer stop()
+
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ollamaPull returned %v, want nil", err)
 	}
 }
