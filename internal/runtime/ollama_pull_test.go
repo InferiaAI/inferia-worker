@@ -231,3 +231,32 @@ func TestOllamaPull_UnparseableBody(t *testing.T) {
 		t.Fatalf("err = nil, want non-nil")
 	}
 }
+
+func TestOllamaPull_TerminalStatusFailed(t *testing.T) {
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"failed"}`)
+	})
+	defer stop()
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil for non-success terminal status")
+	}
+}
+
+func TestOllamaPull_LongErrorBodyTruncated(t *testing.T) {
+	// Server returns 4xx with a body > 256 bytes to exercise the truncate path.
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, strings.Repeat("x", 512))
+	})
+	defer stop()
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil")
+	}
+	// The error message should be bounded — must contain the truncation marker.
+	if !strings.Contains(err.Error(), "…") {
+		t.Errorf("err = %v, want truncated body marker", err)
+	}
+}
