@@ -76,3 +76,60 @@ func TestOllamaPull_StreamingNDJSON(t *testing.T) {
 		t.Fatalf("ollamaPull returned %v, want nil", err)
 	}
 }
+
+func TestOllamaPull_Transient5xxRetried(t *testing.T) {
+	var calls int
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"status":"success"}`)
+	})
+	defer stop()
+
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err != nil {
+		t.Fatalf("err = %v, want nil after retry", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2", calls)
+	}
+}
+
+func TestOllamaPull_Persistent5xxFails(t *testing.T) {
+	var calls int
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	defer stop()
+
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil")
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (initial + 1 retry)", calls)
+	}
+}
+
+func TestOllamaPull_4xxNotRetried(t *testing.T) {
+	var calls int
+	host, stop := newOllamaServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"pull model manifest: file does not exist"}`)
+	})
+	defer stop()
+
+	err := ollamaPull(context.Background(), "http://"+host, "qwen3:0.6b", 5*time.Second)
+	if err == nil {
+		t.Fatalf("err = nil, want non-nil")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no retry on 4xx)", calls)
+	}
+}

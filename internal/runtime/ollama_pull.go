@@ -23,29 +23,40 @@ func ollamaPull(ctx context.Context, endpoint, model string, timeout time.Durati
 	defer cancel()
 
 	body, _ := json.Marshal(map[string]any{"name": model, "stream": false})
-	req, err := http.NewRequestWithContext(cctx, http.MethodPost,
-		strings.TrimRight(endpoint, "/")+"/api/pull", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("ollama pull: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("ollama pull: post: %w", err)
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(cctx, http.MethodPost,
+			strings.TrimRight(endpoint, "/")+"/api/pull", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("ollama pull: build request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("ollama pull: post: %w", err)
+			if cctx.Err() != nil {
+				return lastErr
+			}
+			continue // network errors are retryable
+		}
+		raw, rerr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if rerr != nil {
+			lastErr = fmt.Errorf("ollama pull: read body: %w", rerr)
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("ollama pull: status=%d body=%s", resp.StatusCode, truncate(raw, 256))
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("ollama pull: status=%d body=%s", resp.StatusCode, truncate(raw, 256))
+		}
+		return checkOllamaPullResponse(raw)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama pull: status=%d body=%s", resp.StatusCode, truncate(raw, 256))
-	}
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("ollama pull: read body: %w", err)
-	}
-	return checkOllamaPullResponse(raw)
+	return lastErr
 }
 
 // validateOllamaModelName rejects empty, oversized, or shell-meta-bearing names.
