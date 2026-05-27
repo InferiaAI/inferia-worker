@@ -31,6 +31,7 @@ import (
 	"github.com/inferia/inferia-worker/internal/runtime"
 	"github.com/inferia/inferia-worker/internal/runtime/dockerclient"
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
+	"github.com/inferia/inferia-worker/internal/shellbridge"
 	"github.com/inferia/inferia-worker/internal/telemetry"
 )
 
@@ -146,8 +147,13 @@ func main() {
 
 	// Admin WS endpoints (live container logs + interactive shell). Mount
 	// these before the generic inference proxy so they win the route match.
+	// Also install shellbridge's default backends so the channel tunnel
+	// path can spawn sessions on demand (the CP-driven dashboard route
+	// uses these; the admin handlers do their own resolution chain).
 	if raw, ok := docker.(dockerclient.RawAccessor); ok {
 		admin.Register(app, raw.Raw(), rt)
+		shellbridge.SetDockerClient(raw.Raw(), rt)
+		shellbridge.SetDockerLogsBackend(raw.Raw(), rt)
 	} else {
 		log.Printf("admin endpoints: docker client does not expose Raw(); logs/shell tabs disabled")
 	}

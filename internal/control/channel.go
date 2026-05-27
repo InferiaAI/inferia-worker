@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/inferia/inferia-worker/internal/cloudenv"
@@ -38,6 +39,20 @@ type Channel struct {
 
 	// internal
 	dedup *dedup
+
+	// connState holds per-connection state — the active websocket, the
+	// serializing write mutex, and the shell/logs tunnel. Replaced on each
+	// connectOnce so a stale write into a closed conn lands on a stub.
+	connMu    sync.Mutex
+	connState *connState
+}
+
+// connState is the per-WS-connection bundle. Lives only for one
+// connectOnce call; cleared (after CloseAll) on disconnect.
+type connState struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+	tunnel  *ChannelShellTunnel
 }
 
 // Run blocks until ctx is cancelled, dialing/reconnecting in a loop.
@@ -83,7 +98,7 @@ func (ch *Channel) sendHello(ctx context.Context, conn *websocket.Conn) error {
 			AvailabilityZone: ch.Runtime.AvailabilityZone,
 		},
 	}
-	return writeEnvelope(ctx, conn, env)
+	return ch.serializedWrite(ctx, conn, env)
 }
 
 // connectOnce dials, then runs read/write loops until either side closes.
@@ -97,6 +112,27 @@ func (ch *Channel) connectOnce(ctx context.Context) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// Per-connection state: serializing write mutex + shell/logs tunnel.
+	// Replaced on every reconnect so a stale send from a goroutine that
+	// outlived the previous WS lands harmlessly.
+	state := &connState{conn: conn}
+	state.tunnel = NewChannelShellTunnel(channelSender{state: state})
+	ch.connMu.Lock()
+	ch.connState = state
+	ch.connMu.Unlock()
+	// Teardown: when this connection ends (for any reason), kill all live
+	// shell/logs sessions so the OS processes / docker hijacks don't leak.
+	defer func() {
+		ch.connMu.Lock()
+		// Only clear if the active state is still ours (a parallel
+		// reconnect could have already replaced it).
+		if ch.connState == state {
+			ch.connState = nil
+		}
+		ch.connMu.Unlock()
+		state.tunnel.CloseAll()
+	}()
 
 	// Send Hello immediately after connect so the CP sees cloud-env fields.
 	if err := ch.sendHello(ctx, conn); err != nil {
@@ -160,15 +196,35 @@ func (ch *Channel) heartbeatLoop(ctx context.Context, conn *websocket.Conn) erro
 				TS:   time.Now().UTC().Format(time.RFC3339Nano),
 				Body: snap,
 			}
-			if err := writeEnvelope(ctx, conn, env); err != nil {
+			if err := ch.serializedWrite(ctx, conn, env); err != nil {
 				return err
 			}
 		}
 	}
 }
 
+// serializedWrite is the in-loop write that uses the connState write
+// mutex when one is active. Falls back to a bare writeEnvelope for old
+// tests that don't construct a connState.
+func (ch *Channel) serializedWrite(ctx context.Context, conn *websocket.Conn, env Envelope) error {
+	ch.connMu.Lock()
+	state := ch.connState
+	ch.connMu.Unlock()
+	return writeEnvelopeOn(ctx, conn, state, env)
+}
+
 // handle routes one inbound envelope.
 func (ch *Channel) handle(ctx context.Context, conn *websocket.Conn, env Envelope) {
+	// Shell/logs tunnel multiplexes a wide set of envelope types over the
+	// same channel. Route those first so the main switch stays small.
+	ch.connMu.Lock()
+	state := ch.connState
+	ch.connMu.Unlock()
+	if state != nil && state.tunnel != nil {
+		if state.tunnel.Handle(ctx, env) {
+			return
+		}
+	}
 	switch env.Type {
 	case MsgHello, MsgPing:
 		return
@@ -209,22 +265,47 @@ func (ch *Channel) reply(ctx context.Context, conn *websocket.Conn, body Command
 		TS:   time.Now().UTC().Format(time.RFC3339Nano),
 		Body: body,
 	}
-	_ = writeEnvelope(ctx, conn, env)
+	_ = ch.serializedWrite(ctx, conn, env)
 }
 
 func (ch *Channel) replyFailed(ctx context.Context, conn *websocket.Conn, inReplyTo, detail string) {
 	ch.reply(ctx, conn, CommandResultBody{InReplyTo: inReplyTo, Status: "failed", Detail: detail})
 }
 
-// writeEnvelope marshals + writes one frame. Bounded write deadline.
-func writeEnvelope(ctx context.Context, conn *websocket.Conn, env Envelope) error {
+// writeEnvelopeOn marshals + writes one frame with a bounded deadline.
+// When state is non-nil its writeMu serializes concurrent writers
+// (heartbeat loop, command results, shell tunnel output goroutines) so
+// the websocket library never sees overlapping frames. When state is
+// nil the write proceeds without serialization — used only when the
+// caller has already serialized via some other mechanism.
+func writeEnvelopeOn(ctx context.Context, conn *websocket.Conn, state *connState, env Envelope) error {
 	data, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
+	if state != nil {
+		state.writeMu.Lock()
+		defer state.writeMu.Unlock()
+	}
 	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return conn.Write(writeCtx, websocket.MessageText, data)
+}
+
+// channelSender bridges the shell tunnel's envelopeSender interface to
+// the channel's serializing writer. Holds a reference to the per-
+// connection state so a goroutine that races with a reconnect still
+// targets the right (now-defunct) conn — the write fails fast and the
+// goroutine winds up.
+type channelSender struct {
+	state *connState
+}
+
+func (cs channelSender) WriteEnvelope(ctx context.Context, env Envelope) error {
+	if cs.state == nil || cs.state.conn == nil {
+		return errors.New("channel: no active connection")
+	}
+	return writeEnvelopeOn(ctx, cs.state.conn, cs.state, env)
 }
 
 // remarshal converts an arbitrary `any` (json.Unmarshal yields map[string]any
