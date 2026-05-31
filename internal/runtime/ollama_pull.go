@@ -120,13 +120,16 @@ func truncate(b []byte, n int) string {
 
 // ollamaPullIfNeeded runs ollamaPull for ollama-recipe deployments. It is a
 // no-op for non-ollama containers (detected by the presence of the
-// INFERIA_OLLAMA_MODEL env var). The endpoint is the in-network address of
-// the model container (same shape the readiness probe uses).
-func ollamaPullIfNeeded(ctx context.Context, plan recipesPlan, timeout time.Duration) error {
+// INFERIA_OLLAMA_MODEL env var). ``endpoint`` MUST be the same host-bound
+// address the readiness probe used (AdvertiseHost:hostPort) — NOT the bridge
+// container name. The worker runs with `--network host`, so a bridge container
+// name is not DNS-resolvable from the worker process; using it here produced
+// `dial tcp: lookup inferia-ollama-...: server misbehaving` and failed every
+// ollama load right after the readiness probe passed.
+func ollamaPullIfNeeded(ctx context.Context, plan recipesPlan, endpoint string, timeout time.Duration) error {
 	model := plan.Env["INFERIA_OLLAMA_MODEL"]
 	if model == "" {
 		return nil // not an ollama recipe
 	}
-	endpoint := fmt.Sprintf("http://%s:%d", plan.ContainerName, plan.ContainerPort)
 	return ollamaPull(ctx, endpoint, model, timeout)
 }

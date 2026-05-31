@@ -213,7 +213,7 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		return nil, errors.New("readiness probe timed out")
 	}
 
-	if err := ollamaPullIfNeeded(ctx, plan, r.cfg.PullTimeout); err != nil {
+	if err := ollamaPullIfNeeded(ctx, plan, endpoint, r.cfg.PullTimeout); err != nil {
 		_ = r.cfg.Docker.Stop(ctx, cid, 5)
 		_ = r.cfg.Docker.Remove(ctx, cid)
 		r.setState(deploymentID, StateFailed)

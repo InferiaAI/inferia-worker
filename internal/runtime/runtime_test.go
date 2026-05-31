@@ -334,10 +334,13 @@ func TestLoadModel_OllamaPullsAfterReady(t *testing.T) {
 	fc := fake.New()
 	rt := newRT(t, fc, okProbe)
 
-	// Use the httptest server's host directly as ContainerName so the pull
-	// reaches our fake server via the in-process network.
-	plan := ollamaSamplePlan("inferia-ollama-dep-1", "qwen3:0.6b", port)
-	plan.ContainerName = u.Hostname()
+	// Regression guard (server misbehaving / NXDOMAIN under --network host):
+	// the pull MUST reach the host-bound port (AdvertiseHost:HostPort), NOT the
+	// bridge ContainerName. ContainerName is deliberately a bogus, unresolvable
+	// name here; HostPort points at the fake ollama server (on 127.0.0.1, the
+	// default AdvertiseHost). If the pull regressed to dialing ContainerName,
+	// this test would fail to reach the server and `pulled` would stay 0.
+	plan := ollamaSamplePlan("inferia-ollama-bridge-unresolvable", "qwen3:0.6b", port)
 
 	_, err = rt.LoadModel(context.Background(), "dep-1", plan)
 	if err != nil {
