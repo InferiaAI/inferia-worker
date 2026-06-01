@@ -53,18 +53,21 @@ const (
 // Allowed runtime-config keys (mirrors InferiaLLM/llmd/spec_builder.py). Values
 // must be safe scalar types; nested structures are dropped.
 var allowedConfigKeys = map[string]struct{}{
-	"tensor_parallel_size":   {},
-	"pipeline_parallel_size": {},
-	"dtype":                  {},
-	"max_model_len":          {},
-	"max_num_seqs":           {},
-	"gpu_memory_utilization": {},
-	"quantization":           {},
-	"enforce_eager":          {},
-	"trust_remote_code":      {},
-	"max_batch_size":         {},
-	"max_input_length":       {},
-	"max_total_tokens":       {},
+	"tensor_parallel_size":    {},
+	"pipeline_parallel_size":  {},
+	"dtype":                   {},
+	"max_model_len":           {},
+	"max_num_seqs":            {},
+	"gpu_memory_utilization":  {},
+	"quantization":            {},
+	"enforce_eager":           {},
+	"trust_remote_code":       {},
+	"max_batch_size":          {},
+	"max_input_length":        {},
+	"max_total_tokens":        {},
+	"kv_cache_dtype":          {},
+	"enable_prefix_caching":   {},
+	"max_num_batched_tokens":  {},
 }
 
 // Allowed URI schemes (mirrors spec_builder.py).
