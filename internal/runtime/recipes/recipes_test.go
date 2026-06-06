@@ -75,6 +75,63 @@ func TestBuildPlan_VLLM_Defaults(t *testing.T) {
 	}
 }
 
+// Regression: the vllm-openai image bakes a CUDA forward-compat libcuda ahead
+// of the standard lib dirs, which mismatches a newer host kernel driver and
+// makes CUDA init fail with Error 803 before any weights are fetched (deploy
+// hangs in DEPLOYING). The recipe must default LD_LIBRARY_PATH so the multiarch
+// dir (host driver injected by nvidia-container-toolkit) is searched FIRST.
+func TestBuildPlan_VLLM_SetsLDLibraryPathForCudaCompat(t *testing.T) {
+	r, _ := Get("vllm")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "dep-ld",
+		ArtifactURI:  "hf://Qwen/Qwen3-0.6B",
+		GPUIndices:   []int{0},
+		HostPort:     19000,
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	ldp, ok := plan.Env["LD_LIBRARY_PATH"]
+	if !ok {
+		t.Fatalf("LD_LIBRARY_PATH not set; env=%v", plan.Env)
+	}
+	// The host-driver multiarch dir MUST come first so it wins over the image's
+	// baked compat libcuda.
+	if !strings.HasPrefix(ldp, "/usr/lib/x86_64-linux-gnu") {
+		t.Errorf("LD_LIBRARY_PATH must start with the multiarch dir, got %q", ldp)
+	}
+	// The toolkit and cuda lib dirs must remain on the path for the rest of the
+	// CUDA userspace.
+	for _, want := range []string{"/usr/local/nvidia/lib64", "/usr/local/cuda/lib64"} {
+		if !strings.Contains(ldp, want) {
+			t.Errorf("LD_LIBRARY_PATH missing %q, got %q", want, ldp)
+		}
+	}
+	// The existing CUDA_MODULE_LOADING default must still be present.
+	if plan.Env["CUDA_MODULE_LOADING"] != "LAZY" {
+		t.Errorf("CUDA_MODULE_LOADING=%q, want LAZY", plan.Env["CUDA_MODULE_LOADING"])
+	}
+}
+
+// A deploy that explicitly supplies LD_LIBRARY_PATH (rare, advanced) must be
+// able to override the default — mergeEnv applies user env over defaults.
+func TestBuildPlan_VLLM_UserLDLibraryPathOverridesDefault(t *testing.T) {
+	r, _ := Get("vllm")
+	plan, err := r.BuildPlan(BuildInput{
+		DeploymentID: "dep-ld2",
+		ArtifactURI:  "hf://Qwen/Qwen3-0.6B",
+		GPUIndices:   []int{0},
+		HostPort:     19000,
+		Env:          map[string]string{"LD_LIBRARY_PATH": "/custom/path"},
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if plan.Env["LD_LIBRARY_PATH"] != "/custom/path" {
+		t.Errorf("user LD_LIBRARY_PATH not honored, got %q", plan.Env["LD_LIBRARY_PATH"])
+	}
+}
+
 func TestBuildPlan_Ollama_StripsHFScheme(t *testing.T) {
 	r, _ := Get("ollama")
 	plan, err := r.BuildPlan(BuildInput{
