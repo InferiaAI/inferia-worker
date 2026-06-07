@@ -38,7 +38,7 @@ func TestIntegration_PingPullCreateStartStopRemove(t *testing.T) {
 		t.Fatalf("EnsureNetwork: %v", err)
 	}
 	// Pull a small image. Skip if the host has no network.
-	if err := c.Pull(ctx, "docker.io/library/hello-world:latest"); err != nil {
+	if err := c.Pull(ctx, "docker.io/library/hello-world:latest", nil); err != nil {
 		t.Skipf("Pull skipped (offline?): %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestIntegration_StopOnLongRunning(t *testing.T) {
 	if err := c.EnsureNetwork(ctx, "inferia-it-stop"); err != nil {
 		t.Fatalf("%v", err)
 	}
-	if err := c.Pull(ctx, "docker.io/library/alpine:latest"); err != nil {
+	if err := c.Pull(ctx, "docker.io/library/alpine:latest", nil); err != nil {
 		t.Skipf("Pull skipped: %v", err)
 	}
 	spec := &ContainerSpec{

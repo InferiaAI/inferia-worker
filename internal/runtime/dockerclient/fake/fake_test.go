@@ -17,7 +17,7 @@ func TestFake_Lifecycle(t *testing.T) {
 	if err := c.EnsureNetwork(ctx, "inferia-models"); err != nil {
 		t.Fatalf("%v", err)
 	}
-	if err := c.Pull(ctx, "img"); err != nil {
+	if err := c.Pull(ctx, "img", nil); err != nil {
 		t.Fatalf("%v", err)
 	}
 	id, err := c.Create(ctx, &dockerclient.ContainerSpec{Name: "foo"})
@@ -58,7 +58,7 @@ func TestFake_ErrorInjection(t *testing.T) {
 	cases := map[string]func() error{
 		"Ping":          func() error { c.PingErr = boom; return c.Ping(ctx) },
 		"EnsureNetwork": func() error { c.EnsureNetworkErr = boom; return c.EnsureNetwork(ctx, "n") },
-		"Pull":          func() error { c.PullErr = boom; return c.Pull(ctx, "img") },
+		"Pull":          func() error { c.PullErr = boom; return c.Pull(ctx, "img", nil) },
 		"Create": func() error {
 			c.CreateErr = boom
 			_, err := c.Create(ctx, &dockerclient.ContainerSpec{Name: "x"})
@@ -90,7 +90,7 @@ func TestFake_ErrorInjection(t *testing.T) {
 				}
 			case "Pull":
 				f.PullErr = boom
-				if err := f.Pull(ctx, "img"); err == nil {
+				if err := f.Pull(ctx, "img", nil); err == nil {
 					t.Errorf("expected error")
 				}
 			case "Create":
