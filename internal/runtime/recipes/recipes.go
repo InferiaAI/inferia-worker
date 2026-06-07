@@ -182,7 +182,7 @@ func stripScheme(uri string) string {
 // (string, int, int64, float64, bool). Everything else is dropped.
 func sanitiseConfig(in map[string]any) map[string]any {
 	if len(in) == 0 {
-		return nil
+		return map[string]any{}
 	}
 	out := map[string]any{}
 	for k, v := range in {

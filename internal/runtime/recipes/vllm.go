@@ -24,9 +24,6 @@ func (r vllmRecipe) BuildPlan(in BuildInput) (Plan, error) {
 	}
 	model := stripScheme(in.ArtifactURI)
 	cfg := sanitiseConfig(in.Config)
-	if cfg == nil {
-		cfg = map[string]any{}
-	}
 
 	// ----- GPU-aware default flags -----
 	envDefaults := map[string]string{
