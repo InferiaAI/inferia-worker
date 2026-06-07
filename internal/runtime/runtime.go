@@ -48,6 +48,10 @@ type deployment struct {
 	state       State
 	plan        recipes.Plan
 
+	// prog buffers lifecycle/pull-progress lines surfaced as logs before the
+	// container exists. Always non-nil for a registered deployment.
+	prog *progressLog
+
 	// init guards a single concurrent LoadModel for the same id.
 	init sync.Mutex
 }
@@ -162,26 +166,37 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 		plan.HostPort = hostPort
 	}
 
-	// Pull.
+	// Pull. Surface progress as deployment logs (visible in the dashboard's
+	// terminal while the container does not yet exist).
 	r.setState(deploymentID, StatePulling)
+	d.prog.append("Pulling image " + plan.Image + " …")
 	pullCtx, cancel := context.WithTimeout(ctx, r.cfg.PullTimeout)
-	if err := r.cfg.Docker.Pull(pullCtx, plan.Image); err != nil {
+	if err := r.cfg.Docker.Pull(pullCtx, plan.Image, func(line string) {
+		d.prog.append(line)
+	}); err != nil {
 		cancel()
+		d.prog.append("Failed: pull: " + err.Error())
+		d.prog.markFailed()
 		r.setState(deploymentID, StateFailed)
 		r.drop(deploymentID)
 		return nil, fmt.Errorf("pull: %w", err)
 	}
 	cancel()
+	d.prog.append("Image ready. Creating container…")
 
 	// Create + start.
 	spec, err := dockerclient.BuildContainerSpec(plan, r.cfg.Network)
 	if err != nil {
+		d.prog.append("Failed: spec: " + err.Error())
+		d.prog.markFailed()
 		r.setState(deploymentID, StateFailed)
 		r.drop(deploymentID)
 		return nil, fmt.Errorf("spec: %w", err)
 	}
 	cid, err := r.cfg.Docker.Create(ctx, spec)
 	if err != nil {
+		d.prog.append("Failed: create: " + err.Error())
+		d.prog.markFailed()
 		r.setState(deploymentID, StateFailed)
 		r.drop(deploymentID)
 		return nil, fmt.Errorf("create: %w", err)
@@ -189,12 +204,18 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 	r.setContainerID(deploymentID, cid)
 
 	r.setState(deploymentID, StateStarting)
+	d.prog.append("Starting container…")
 	if err := r.cfg.Docker.Start(ctx, cid); err != nil {
 		_ = r.cfg.Docker.Remove(ctx, cid)
+		d.prog.append("Failed: start: " + err.Error())
+		d.prog.markFailed()
 		r.setState(deploymentID, StateFailed)
 		r.drop(deploymentID)
 		return nil, fmt.Errorf("start: %w", err)
 	}
+	// Container is up — hand off log following to real container logs.
+	d.prog.append("Container started. Streaming container logs…")
+	d.prog.markContainerStarted(cid)
 
 	// Wait for readiness. Probe the model container at the SAME address the
 	// inference proxy will route to: AdvertiseHost:hostPort (the host-bound
@@ -265,8 +286,10 @@ func (r *Runtime) getOrCreate(deploymentID string) *deployment {
 	defer r.mu.Unlock()
 	d, ok := r.deployments[deploymentID]
 	if !ok {
-		d = &deployment{state: StateAbsent}
+		d = &deployment{state: StateAbsent, prog: newProgressLog()}
 		r.deployments[deploymentID] = d
+	} else if d.prog == nil {
+		d.prog = newProgressLog()
 	}
 	return d
 }

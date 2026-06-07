@@ -18,6 +18,8 @@ type Client struct {
 	Pinged          int
 	NetworksCreated []string
 	Pulled          []string
+	// PullProgressLines, when set, are replayed to Pull's onProgress callback.
+	PullProgressLines []string
 	Created         []*dockerclient.ContainerSpec
 	Started         []string
 	Stopped         []string
@@ -65,13 +67,22 @@ func (c *Client) EnsureNetwork(ctx context.Context, name string) error {
 	return nil
 }
 
-func (c *Client) Pull(ctx context.Context, image string) error {
+func (c *Client) Pull(ctx context.Context, image string, onProgress func(line string)) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	lines := append([]string(nil), c.PullProgressLines...)
 	if c.PullErr != nil {
+		c.mu.Unlock()
 		return c.PullErr
 	}
 	c.Pulled = append(c.Pulled, image)
+	c.mu.Unlock()
+	// Replay any scripted progress lines so callers/tests can exercise the
+	// progress callback path.
+	if onProgress != nil {
+		for _, l := range lines {
+			onProgress(l)
+		}
+	}
 	return nil
 }
 

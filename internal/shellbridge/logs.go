@@ -142,6 +142,15 @@ func SetDockerLogsBackend(cli *client.Client, rt Runtime) {
 	DefaultLogsSpawn = func(cfg LogsSessionConfig) (LogsBackend, error) {
 		cid, err := ResolveContainer(cli, rt, cfg.Container, cfg.Deployment)
 		if err != nil {
+			// No container yet, but the worker IS loading this deployment:
+			// stream lifecycle/pull progress until the container exists, then
+			// hand off to its real logs.
+			if cfg.Deployment != "" && rt != nil && rt.DeploymentKnown(cfg.Deployment) {
+				tail := cfg.Tail
+				return newProgressLogsBackend(rt, cfg.Deployment, func(containerID string) LogsBackend {
+					return NewDockerLogsBackend(cli, containerID, tail)
+				}), nil
+			}
 			return nil, err
 		}
 		return NewDockerLogsBackend(cli, cid, cfg.Tail), nil

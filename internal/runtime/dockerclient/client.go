@@ -19,7 +19,10 @@ import (
 type Client interface {
 	Ping(ctx context.Context) error
 	EnsureNetwork(ctx context.Context, name string) error
-	Pull(ctx context.Context, image string) error
+	// Pull fetches the image. onProgress, when non-nil, receives throttled
+	// human-readable progress lines (e.g. "Pulling image… 42% (14.7 GB / 35.0 GB)")
+	// so callers can surface pull progress as logs. Pass nil to ignore progress.
+	Pull(ctx context.Context, image string, onProgress func(line string)) error
 	Create(ctx context.Context, spec *ContainerSpec) (containerID string, err error)
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeoutSeconds int) error
@@ -111,15 +114,40 @@ func (e *dockerEngine) EnsureNetwork(ctx context.Context, name string) error {
 	return nil
 }
 
-func (e *dockerEngine) Pull(ctx context.Context, img string) error {
+func (e *dockerEngine) Pull(ctx context.Context, img string, onProgress func(line string)) error {
 	rc, err := e.cli.ImagePull(ctx, img, image.PullOptions{})
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-	// Drain progress JSON so the pull actually completes.
-	_, err = io.Copy(io.Discard, rc)
-	return err
+	// The progress stream MUST be fully drained for the pull to complete. When
+	// nobody wants progress, drain straight to /dev/null (cheapest path).
+	if onProgress == nil {
+		_, err = io.Copy(io.Discard, rc)
+		return err
+	}
+	// Otherwise decode the per-line progress JSON, fold it into an overall
+	// percentage, and emit throttled summary lines.
+	tracker := newPullProgressTracker()
+	dec := json.NewDecoder(rc)
+	for {
+		var m pullMessage
+		if derr := dec.Decode(&m); derr != nil {
+			if derr == io.EOF {
+				return nil
+			}
+			// Malformed/partial frame — keep draining so the pull still
+			// finishes; just stop reporting progress.
+			_, _ = io.Copy(io.Discard, rc)
+			return nil
+		}
+		if m.Error != "" {
+			return fmt.Errorf("pull: %s", m.Error)
+		}
+		if line, ok := tracker.update(m); ok {
+			onProgress(line)
+		}
+	}
 }
 
 func (e *dockerEngine) Create(ctx context.Context, spec *ContainerSpec) (string, error) {
