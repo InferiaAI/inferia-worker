@@ -72,6 +72,15 @@ func (s shellbridgeRuntime) ContainerForDeployment(id string) string {
 }
 func (s shellbridgeRuntime) LoadedDeployments() []string { return s.inner.LoadedDeployments() }
 
+// The legacy admin /v1/logs path only uses this adapter for
+// shellbridge.ResolveContainer, which never calls the progress methods (those
+// fire only in the channel-tunnel's DefaultLogsSpawn, wired with the real
+// runtime). These satisfy the interface without coupling admin.Runtime to it.
+func (s shellbridgeRuntime) DeploymentKnown(string) bool { return false }
+func (s shellbridgeRuntime) SubscribeProgress(string) (replay []string, lines <-chan string, outcome func() (string, bool), ok bool) {
+	return nil, nil, nil, false
+}
+
 // containerLookup retained for backwards compatibility with the existing
 // test suite (admin_test.go exercises resolveContainerCore). The real
 // resolver now lives in shellbridge.ResolveContainer; this surface only

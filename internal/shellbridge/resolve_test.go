@@ -10,10 +10,23 @@ import (
 type fakeRuntime struct {
 	loaded    []string
 	container map[string]string
+
+	// progress support (for the progressLogsBackend tests).
+	known       map[string]bool
+	progReplay  map[string][]string
+	progLines   map[string]<-chan string
+	progOutcome map[string]func() (string, bool)
 }
 
 func (f fakeRuntime) ContainerForDeployment(id string) string { return f.container[id] }
 func (f fakeRuntime) LoadedDeployments() []string             { return f.loaded }
+func (f fakeRuntime) DeploymentKnown(id string) bool          { return f.known[id] }
+func (f fakeRuntime) SubscribeProgress(id string) (replay []string, lines <-chan string, outcome func() (string, bool), ok bool) {
+	if f.progOutcome == nil || f.progOutcome[id] == nil {
+		return nil, nil, nil, false
+	}
+	return f.progReplay[id], f.progLines[id], f.progOutcome[id], true
+}
 
 func TestResolveContainer_ExplicitContainerWins(t *testing.T) {
 	rt := fakeRuntime{loaded: []string{"d-1"}, container: map[string]string{"d-1": "rt-cid"}}

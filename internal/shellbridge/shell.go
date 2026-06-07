@@ -82,10 +82,23 @@ func NewDockerShellBackend(cli *client.Client, containerID string) ShellBackend 
 }
 
 // Runtime is the small subset of runtime state shellbridge needs to map
-// deployment IDs to docker container IDs.
+// deployment IDs to docker container IDs and to surface pre-container
+// lifecycle/pull progress as logs.
 type Runtime interface {
 	ContainerForDeployment(deploymentID string) string
 	LoadedDeployments() []string
+
+	// DeploymentKnown reports whether the worker is currently loading or
+	// running the deployment (so a logs request can fall back to
+	// lifecycle/pull-progress output while no container exists yet).
+	DeploymentKnown(deploymentID string) bool
+
+	// SubscribeProgress returns the buffered progress lines, a channel of new
+	// ones (closed when the load terminates), and an outcome func to call
+	// after the channel closes: a non-empty containerID means "switch to real
+	// container logs", failed means the load failed. ok is false when the
+	// deployment has no progress log.
+	SubscribeProgress(deploymentID string) (replay []string, lines <-chan string, outcome func() (containerID string, failed bool), ok bool)
 }
 
 // ShellSessionConfig fully describes one shell session. The caller is
