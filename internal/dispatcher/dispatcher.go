@@ -6,6 +6,7 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/inferia/inferia-worker/internal/control"
 	"github.com/inferia/inferia-worker/internal/metrics"
@@ -43,14 +44,6 @@ type LoadResult struct {
 // TelemetryReader returns one snapshot of host CPU/memory/GPU usage.
 type TelemetryReader interface {
 	Read() (used map[string]string)
-}
-
-// Dispatcher implements control.Dispatcher.
-type Dispatcher struct {
-	Rt        Runtime
-	Telemetry TelemetryReader
-	GPUName   string // populated by main.go from telemetry.ReadGPU()
-	GPUMemMiB uint64 // populated by main.go from telemetry.ReadGPU()
 }
 
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
@@ -129,20 +122,6 @@ func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 	return body
 }
 
-
-// HeartbeatSnapshot composes the periodic heartbeat body.
-func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
-	var used map[string]string
-	if d.Telemetry != nil {
-		used = d.Telemetry.Read()
-	} else {
-		used = map[string]string{}
-	}
-	return control.HeartbeatBody{
-		Used:         used,
-		LoadedModels: d.Rt.LoadedDeployments(),
-	}
-}
 
 // SafeFmt is a tiny convenience wrapper exposed so cmd/worker can build its
 // own TelemetryReader without re-importing fmt. Kept package-private otherwise.
