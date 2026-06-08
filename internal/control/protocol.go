@@ -76,12 +76,28 @@ type HelloBody struct {
 // HeartbeatBody is what the worker sends every interval. used is a map of
 // resource → opaque string (matches Python compute_node.proto for migration).
 type HeartbeatBody struct {
-	Used         map[string]string `json:"used"`
-	LoadedModels []string          `json:"loaded_models"`
-	Events       []HeartbeatEvent  `json:"events,omitempty"`
+	Used          map[string]string `json:"used"`
+	LoadedModels  []string          `json:"loaded_models"`
+	Events        []HeartbeatEvent  `json:"events,omitempty"`
+	DeployMetrics []DeploymentMetric `json:"deploy_metrics,omitempty"`
+}
+
+// DeploymentMetric carries performance and lifecycle stats for a single model deployment.
+type DeploymentMetric struct {
+	DeploymentID        string `json:"deployment_id"`
+	Recipe              string `json:"recipe"`
+	Model               string `json:"model"`
+	RequestsTotal       int64  `json:"requests_total"`
+	ActiveRequests      int64  `json:"active_requests"`
+	RequestLatencyP50Ms int64  `json:"request_latency_p50_ms"`
+	RequestLatencyP95Ms int64  `json:"request_latency_p95_ms"`
+	PullDurationMs      int64  `json:"pull_duration_ms"`
+	StartDurationMs     int64  `json:"start_duration_ms"`
+	Phase               string `json:"phase"`
 }
 
 // HeartbeatEvent represents asynchronous lifecycle facts piggybacked on the
+
 // heartbeat (rather than a separate WS frame). MVP only emits ModelExited.
 type HeartbeatEvent struct {
 	Type         string `json:"type"`

@@ -8,16 +8,31 @@ import (
 	"fmt"
 
 	"github.com/inferia/inferia-worker/internal/control"
+	"github.com/inferia/inferia-worker/internal/metrics"
+	"github.com/inferia/inferia-worker/internal/runtime"
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
-// Runtime is the narrow view of runtime.Runtime that Dispatcher needs.
-// Defined as an interface so tests can supply a fake.
-type Runtime interface {
-	LoadModel(ctx context.Context, deploymentID string, plan recipes.Plan) (*LoadResult, error)
-	UnloadModel(ctx context.Context, deploymentID string) error
-	LoadedDeployments() []string
+// Dispatcher implements control.Dispatcher. It is the primary adapter between
+// the control plane (WS channel) and the worker's local runtime.
+type Dispatcher struct {
+	Rt        runtime.Runtime
+	Telemetry TelemetryReader
+	Metrics   *metrics.Collector
+	GPUName   string
+	GPUMemMiB uint64
 }
+
+func NewDispatcher(rt runtime.Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
+	return &Dispatcher{
+		Rt:        rt,
+		Telemetry: tel,
+		Metrics:   mc,
+		GPUName:   gpuName,
+		GPUMemMiB: gpuMem,
+	}
+}
+
 
 // LoadResult mirrors runtime.LoadResult so this package doesn't import runtime
 // (avoiding cycles when runtime imports dispatcher in some future refactor).
@@ -77,8 +92,43 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 
 // UnloadModel is a direct passthrough.
 func (d *Dispatcher) UnloadModel(ctx context.Context, body control.UnloadModelBody) error {
-	return d.Rt.UnloadModel(ctx, body.DeploymentID)
+	err := d.Rt.UnloadModel(ctx, body.DeploymentID)
+	if err == nil && d.Metrics != nil {
+		d.Metrics.RemoveDeployment(body.DeploymentID)
+	}
+	return err
 }
+
+func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
+	used := d.Telemetry.Read()
+	models := d.Rt.LoadedDeployments()
+
+	body := control.HeartbeatBody{
+		Used:         used,
+		LoadedModels: models,
+	}
+
+	if d.Metrics != nil {
+		// Gather runtime info for all loaded deployments to enrich metrics
+		infoMap := make(map[string]struct {
+			recipe, model, phase string
+			pullDur, startDur    time.Duration
+		})
+		for _, id := range models {
+			r, m, p, pd, sd, ok := d.Rt.DeploymentInfo(id)
+			if ok {
+				infoMap[id] = struct {
+					recipe, model, phase string
+					pullDur, startDur    time.Duration
+				}{r, m, p, pd, sd}
+			}
+		}
+		body.DeployMetrics = d.Metrics.Snapshot(infoMap)
+	}
+
+	return body
+}
+
 
 // HeartbeatSnapshot composes the periodic heartbeat body.
 func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {

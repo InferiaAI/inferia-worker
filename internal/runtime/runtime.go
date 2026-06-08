@@ -54,6 +54,8 @@ type deployment struct {
 
 	// init guards a single concurrent LoadModel for the same id.
 	init sync.Mutex
+
+	enteredAt map[State]time.Time
 }
 
 // New constructs a Runtime. Sensible defaults applied for missing optional fields.
@@ -83,6 +85,37 @@ func New(cfg Config) *Runtime {
 		cfg:         cfg,
 		deployments: map[string]*deployment{},
 	}
+}
+
+// DeploymentInfo returns a summary of a deployment's metadata and timing.
+func (r *Runtime) DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deployments[deploymentID]
+	if !ok {
+		return "", "", "", 0, 0, false
+	}
+
+	recipe = d.plan.Image // Simplification: Use image as recipe name or extend recipes.Plan
+	model := ""
+	if d.plan.Env != nil {
+		model = d.plan.Env["INFERIA_OLLAMA_MODEL"]
+	}
+
+	phase = fmt.Sprintf("%v", d.state)
+
+	if t1, ok1 := d.enteredAt[StatePulling]; ok1 {
+		if t2, ok2 := d.enteredAt[StateStarting]; ok2 {
+			pullDur = t2.Sub(t1)
+		}
+	}
+	if t2, ok2 := d.enteredAt[StateStarting]; ok2 {
+		if t3, ok3 := d.enteredAt[StateRunning]; ok3 {
+			startDur = t3.Sub(t2)
+		}
+	}
+
+	return recipe, model, phase, pullDur, startDur, true
 }
 
 // Ping checks docker reachability.
@@ -286,7 +319,11 @@ func (r *Runtime) getOrCreate(deploymentID string) *deployment {
 	defer r.mu.Unlock()
 	d, ok := r.deployments[deploymentID]
 	if !ok {
-		d = &deployment{state: StateAbsent, prog: newProgressLog()}
+		d = &deployment{
+			state:     StateAbsent,
+			prog:      newProgressLog(),
+			enteredAt: make(map[State]time.Time),
+		}
 		r.deployments[deploymentID] = d
 	} else if d.prog == nil {
 		d.prog = newProgressLog()
@@ -299,6 +336,7 @@ func (r *Runtime) setState(id string, s State) {
 	defer r.mu.Unlock()
 	if d, ok := r.deployments[id]; ok {
 		d.state = s
+		d.enteredAt[s] = time.Now()
 	}
 }
 

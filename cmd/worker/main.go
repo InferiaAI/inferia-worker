@@ -28,6 +28,7 @@ import (
 	"github.com/inferia/inferia-worker/internal/dispatcher"
 	"github.com/inferia/inferia-worker/internal/healthz"
 	"github.com/inferia/inferia-worker/internal/inference"
+	"github.com/inferia/inferia-worker/internal/metrics"
 	"github.com/inferia/inferia-worker/internal/runtime"
 	"github.com/inferia/inferia-worker/internal/runtime/dockerclient"
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
@@ -136,6 +137,8 @@ func main() {
 
 	ready := healthz.New()
 
+	mc := metrics.NewCollector()
+
 	// Fiber app.
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
@@ -170,6 +173,7 @@ func main() {
 		Resolver: inference.PathResolver{
 			Header: "X-Inferia-Deployment-Id",
 		},
+		Metrics: mc,
 	}))
 	healthz.Register(app, ready)
 
@@ -180,12 +184,13 @@ func main() {
 		gpuName = gpus[0].Name
 		gpuMemMiB = gpus[0].MemoryTotalMiB
 	}
-	disp := &dispatcher.Dispatcher{
-		Rt:        &runtimeAdapter{r: rt},
-		Telemetry: hostTelemetry{},
-		GPUName:   gpuName,
-		GPUMemMiB: gpuMemMiB,
-	}
+	disp := dispatcher.NewDispatcher(
+		&runtimeAdapter{r: rt},
+		hostTelemetry{},
+		mc,
+		gpuName,
+		gpuMemMiB,
+	)
 
 	ch := &control.Channel{
 		ChannelURL: toWS(cfg.ControlPlaneURL) + "/v1/workers/channel",
