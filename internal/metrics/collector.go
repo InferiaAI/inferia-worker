@@ -1,6 +1,11 @@
 package metrics
 
 import (
+	"bufio"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +20,9 @@ type deploymentBucket struct {
 
 	recipe string
 	model  string
+
+	// vLLM specific scrape data
+	vllmMetrics map[string]float64
 }
 
 type Collector struct {
@@ -39,7 +47,6 @@ func (c *Collector) getBucket(id string, recipe, model string) *deploymentBucket
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Double check
 	if b, ok := c.deployments[id]; ok {
 		return b
 	}
@@ -77,6 +84,46 @@ func (c *Collector) RemoveDeployment(id string) {
 	delete(c.deployments, id)
 }
 
+func (c *Collector) ScrapeVLLM(id string, url string) error {
+	b := c.getBucket(id, "", "")
+	if b.recipe != "vllm" {
+		return nil
+	}
+
+	resp, err := http.Get(url + "/metrics")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if b.vllmMetrics == nil {
+		b.vllmMetrics = make(map[string]float64)
+	}
+
+	re := regexp.MustCompile(`^(vllm:\w+)\s+([\d.]+)$`)
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := re.FindStringSubmatch(line)
+		if len(matches) == 3 {
+			val, _ := strconv.ParseFloat(matches[2], 64)
+			b.vllmMetrics[matches[1]] = val
+		}
+	}
+	return nil
+}
+
+func (c *Collector) GetVLLMMetrics(id string) map[string]float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if b, ok := c.deployments[id]; ok {
+		return b.vllmMetrics
+	}
+	return nil
+}
+
 // RuntimeInfo is a map payload helper to pass states from runtime to the metrics collector.
 type RuntimeInfo struct {
 	Recipe, Model, Phase string
@@ -84,8 +131,8 @@ type RuntimeInfo struct {
 }
 
 func (c *Collector) Snapshot(runtimeInfo map[string]RuntimeInfo) []control.DeploymentMetric {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	var results []control.DeploymentMetric
 	for id, b := range c.deployments {
@@ -114,6 +161,7 @@ func (c *Collector) Snapshot(runtimeInfo map[string]RuntimeInfo) []control.Deplo
 			PullDurationMs:      pullDur,
 			StartDurationMs:     startDur,
 			Phase:               phase,
+			EngineMetrics:       b.vllmMetrics,
 		})
 		b.latencyHistogram.Reset()
 	}

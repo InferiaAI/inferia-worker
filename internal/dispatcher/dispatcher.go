@@ -136,7 +136,32 @@ func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 	return body
 }
 
+// StartScraper runs a background loop that periodically scrapes vLLM metrics.
+func (d *Dispatcher) StartScraper(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				models := d.Rt.LoadedDeployments()
+				for _, id := range models {
+					recipe, _, _, _, _, ok := d.Rt.DeploymentInfo(id)
+					if ok && recipe == "vllm" {
+						endpoint := d.Rt.EndpointURL(id)
+						if endpoint != "" && d.Metrics != nil {
+							_ = d.Metrics.ScrapeVLLM(id, endpoint)
+						}
+					}
+				}
+			}
+		}
+	}()
+}
 
 // SafeFmt is a tiny convenience wrapper exposed so cmd/worker can build its
+
 // own TelemetryReader without re-importing fmt. Kept package-private otherwise.
 func SafeFmt(format string, args ...any) string { return fmt.Sprintf(format, args...) }

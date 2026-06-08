@@ -92,8 +92,9 @@ type DeploymentMetric struct {
 	RequestLatencyP50Ms int64  `json:"request_latency_p50_ms"`
 	RequestLatencyP95Ms int64  `json:"request_latency_p95_ms"`
 	PullDurationMs      int64  `json:"pull_duration_ms"`
-	StartDurationMs     int64  `json:"start_duration_ms"`
-	Phase               string `json:"phase"`
+	StartDurationMs     int64              `json:"start_duration_ms"`
+	Phase               string             `json:"phase"`
+	EngineMetrics       map[string]float64 `json:"engine_metrics,omitempty"`
 }
 
 // HeartbeatEvent represents asynchronous lifecycle facts piggybacked on the

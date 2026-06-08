@@ -203,6 +203,9 @@ func main() {
 	}
 	ch.Runtime = runtimeInfo
 
+	// Start background vLLM metrics scraper.
+	disp.StartScraper(ctx, 15*time.Second)
+
 	// Run Fiber + control channel until signal.
 	var wg sync.WaitGroup
 	sigs := make(chan os.Signal, 1)
