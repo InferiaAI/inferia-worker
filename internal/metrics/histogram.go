@@ -21,17 +21,16 @@ func NewSlidingHistogram(limits []int64) *SlidingHistogram {
 }
 
 func (h *SlidingHistogram) Observe(val int64) {
-	h.count.Add(1)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	h.count.Add(1) 
 	for i, limit := range h.limits {
 		if val <= limit {
 			h.buckets[i]++
 			return
 		}
 	}
-	// Overflow
 	h.buckets[len(h.buckets)-1]++
 }
 
@@ -44,15 +43,17 @@ func (h *SlidingHistogram) Snapshot() (p50, p95 int64) {
 		return 0, 0
 	}
 
+	p50Target := (total*95 + 99) / 100
+	p95Target := (total*98 + 99) / 100
+
 	var sum int64
 	p50Idx, p95Idx := -1, -1
-
 	for i, count := range h.buckets {
 		sum += count
-		if p50Idx == -1 && sum >= total/2 {
+		if p50Idx == -1 && sum >= p50Target {
 			p50Idx = i
 		}
-		if p95Idx == -1 && sum >= (total*95)/100 {
+		if p95Idx == -1 && sum >= p95Target {
 			p95Idx = i
 		}
 	}
@@ -63,7 +64,6 @@ func (h *SlidingHistogram) Snapshot() (p50, p95 int64) {
 	if p95Idx != -1 {
 		p95 = h.limits[p95Idx]
 	}
-
 	return p50, p95
 }
 
