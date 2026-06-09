@@ -41,12 +41,24 @@ func (c *Collector) getBucket(id string, recipe, model string) *deploymentBucket
 	c.mu.RUnlock()
 
 	if ok {
+		if recipe != "" {
+			b.recipe = recipe
+		}
+		if model != "" {
+			b.model = model
+		}
 		return b
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if b, ok := c.deployments[id]; ok {
+		if recipe != "" {
+			b.recipe = recipe
+		}
+		if model != "" {
+			b.model = model
+		}
 		return b
 	}
 
