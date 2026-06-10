@@ -12,18 +12,21 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/inferia/inferia-worker/internal/metrics"
 )
 
 // EndpointResolver returns the base URL of the local model container for a
 // deployment, or "" if not loaded. Implemented by *runtime.Runtime.
 type EndpointResolver interface {
 	EndpointURL(deploymentID string) string
+	DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool)
 }
 
 // Config wires up the proxy.
 type Config struct {
 	Runtime  EndpointResolver
 	Resolver PathResolver
+	Metrics  *metrics.Collector
 }
 
 // PathResolver decides which deployment a request targets. If Resolver is set
@@ -82,6 +85,12 @@ func NewProxy(cfg Config) fiber.Handler {
 			return c.Status(fiber.StatusServiceUnavailable).SendString("deployment not loaded")
 		}
 
+		// Metrics: Mark request as active
+		if cfg.Metrics != nil && deploymentID != "" {
+			cfg.Metrics.IncActive(deploymentID)
+			defer cfg.Metrics.DecActive(deploymentID)
+		}
+
 		// Build upstream URL.
 		path := c.Path()
 		query := string(c.Request().URI().QueryString())
@@ -105,10 +114,24 @@ func NewProxy(cfg Config) fiber.Handler {
 			upstreamReq.Header.Add(key, string(v))
 		})
 
+		start := time.Now()
 		resp, err := httpClient.Do(upstreamReq)
+		latency := time.Since(start)
+
 		if err != nil {
 			return c.Status(fiber.StatusBadGateway).SendString("upstream: " + err.Error())
 		}
+
+		// Record metrics — must happen BEFORE SetBodyStream / return nil,
+		// because the handler exits immediately after that for streaming
+		// responses and the code below it is dead.
+		if cfg.Metrics != nil && deploymentID != "" {
+			recipe, model, _, _, _, ok := cfg.Runtime.DeploymentInfo(deploymentID)
+			if ok {
+				cfg.Metrics.RecordRequest(deploymentID, recipe, model, latency.Milliseconds())
+			}
+		}
+
 		// Copy status + headers (excluding hop-by-hop).
 		for k, vs := range resp.Header {
 			if isHopByHop(k) {

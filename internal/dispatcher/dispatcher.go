@@ -6,18 +6,44 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/inferia/inferia-worker/internal/control"
+	"github.com/inferia/inferia-worker/internal/metrics"
+	"github.com/inferia/inferia-worker/internal/runtime"
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
-// Runtime is the narrow view of runtime.Runtime that Dispatcher needs.
-// Defined as an interface so tests can supply a fake.
+// Runtime defines the subset of *runtime.Runtime operations needed by the
+// dispatcher. Avoids packages importing each other recursively.
 type Runtime interface {
-	LoadModel(ctx context.Context, deploymentID string, plan recipes.Plan) (*LoadResult, error)
-	UnloadModel(ctx context.Context, deploymentID string) error
+	LoadModel(ctx context.Context, id string, plan recipes.Plan) (*runtime.LoadResult, error)
+	UnloadModel(ctx context.Context, id string) error
 	LoadedDeployments() []string
+	DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool)
+	EndpointURL(deploymentID string) string
 }
+
+// Dispatcher implements control.Dispatcher. It is the primary adapter between
+// the control plane (WS channel) and the worker's local runtime.
+type Dispatcher struct {
+	Rt        Runtime
+	Telemetry TelemetryReader
+	Metrics   *metrics.Collector
+	GPUName   string
+	GPUMemMiB uint64
+}
+
+func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
+	return &Dispatcher{
+		Rt:        rt,
+		Telemetry: tel,
+		Metrics:   mc,
+		GPUName:   gpuName,
+		GPUMemMiB: gpuMem,
+	}
+}
+
 
 // LoadResult mirrors runtime.LoadResult so this package doesn't import runtime
 // (avoiding cycles when runtime imports dispatcher in some future refactor).
@@ -28,14 +54,6 @@ type LoadResult struct {
 // TelemetryReader returns one snapshot of host CPU/memory/GPU usage.
 type TelemetryReader interface {
 	Read() (used map[string]string)
-}
-
-// Dispatcher implements control.Dispatcher.
-type Dispatcher struct {
-	Rt        Runtime
-	Telemetry TelemetryReader
-	GPUName   string // populated by main.go from telemetry.ReadGPU()
-	GPUMemMiB uint64 // populated by main.go from telemetry.ReadGPU()
 }
 
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
@@ -77,10 +95,13 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 
 // UnloadModel is a direct passthrough.
 func (d *Dispatcher) UnloadModel(ctx context.Context, body control.UnloadModelBody) error {
-	return d.Rt.UnloadModel(ctx, body.DeploymentID)
+	err := d.Rt.UnloadModel(ctx, body.DeploymentID)
+	if err == nil && d.Metrics != nil {
+		d.Metrics.RemoveDeployment(body.DeploymentID)
+	}
+	return err
 }
 
-// HeartbeatSnapshot composes the periodic heartbeat body.
 func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 	var used map[string]string
 	if d.Telemetry != nil {
@@ -88,12 +109,60 @@ func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {
 	} else {
 		used = map[string]string{}
 	}
-	return control.HeartbeatBody{
+	models := d.Rt.LoadedDeployments()
+
+	body := control.HeartbeatBody{
 		Used:         used,
-		LoadedModels: d.Rt.LoadedDeployments(),
+		LoadedModels: models,
 	}
+
+	if d.Metrics != nil {
+		// Gather runtime info for all loaded deployments to enrich metrics
+		infoMap := make(map[string]metrics.RuntimeInfo)
+		for _, id := range models {
+			r, m, p, pd, sd, ok := d.Rt.DeploymentInfo(id)
+			if ok {
+				infoMap[id] = metrics.RuntimeInfo{
+					Recipe:   r,
+					Model:    m,
+					Phase:    p,
+					PullDur:  pd,
+					StartDur: sd,
+				}
+			}
+		}
+		body.DeployMetrics = d.Metrics.Snapshot(infoMap)
+	}
+
+	return body
+}
+
+// StartScraper runs a background loop that periodically scrapes vLLM metrics.
+func (d *Dispatcher) StartScraper(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				models := d.Rt.LoadedDeployments()
+				for _, id := range models {
+					recipe, _, _, _, _, ok := d.Rt.DeploymentInfo(id)
+					if ok && recipe == "vllm" {
+						endpoint := d.Rt.EndpointURL(id)
+						if endpoint != "" && d.Metrics != nil {
+							_ = d.Metrics.ScrapeVLLM(id, endpoint)
+						}
+					}
+				}
+			}
+		}
+	}()
 }
 
 // SafeFmt is a tiny convenience wrapper exposed so cmd/worker can build its
+
 // own TelemetryReader without re-importing fmt. Kept package-private otherwise.
 func SafeFmt(format string, args ...any) string { return fmt.Sprintf(format, args...) }

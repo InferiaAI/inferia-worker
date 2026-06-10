@@ -28,6 +28,7 @@ import (
 	"github.com/inferia/inferia-worker/internal/dispatcher"
 	"github.com/inferia/inferia-worker/internal/healthz"
 	"github.com/inferia/inferia-worker/internal/inference"
+	"github.com/inferia/inferia-worker/internal/metrics"
 	"github.com/inferia/inferia-worker/internal/runtime"
 	"github.com/inferia/inferia-worker/internal/runtime/dockerclient"
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
@@ -136,6 +137,8 @@ func main() {
 
 	ready := healthz.New()
 
+	mc := metrics.NewCollector()
+
 	// Fiber app.
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
@@ -170,6 +173,7 @@ func main() {
 		Resolver: inference.PathResolver{
 			Header: "X-Inferia-Deployment-Id",
 		},
+		Metrics: mc,
 	}))
 	healthz.Register(app, ready)
 
@@ -180,12 +184,13 @@ func main() {
 		gpuName = gpus[0].Name
 		gpuMemMiB = gpus[0].MemoryTotalMiB
 	}
-	disp := &dispatcher.Dispatcher{
-		Rt:        &runtimeAdapter{r: rt},
-		Telemetry: hostTelemetry{},
-		GPUName:   gpuName,
-		GPUMemMiB: gpuMemMiB,
-	}
+	disp := dispatcher.NewDispatcher(
+		&runtimeAdapter{r: rt},
+		hostTelemetry{},
+		mc,
+		gpuName,
+		gpuMemMiB,
+	)
 
 	ch := &control.Channel{
 		ChannelURL: toWS(cfg.ControlPlaneURL) + "/v1/workers/channel",
@@ -197,6 +202,9 @@ func main() {
 		DedupTTL:          5 * time.Minute,
 	}
 	ch.Runtime = runtimeInfo
+
+	// Start background vLLM metrics scraper.
+	disp.StartScraper(ctx, 15*time.Second)
 
 	// Run Fiber + control channel until signal.
 	var wg sync.WaitGroup
@@ -238,17 +246,21 @@ func main() {
 // runtimeAdapter narrows *runtime.Runtime to the dispatcher.Runtime interface.
 type runtimeAdapter struct{ r *runtime.Runtime }
 
-func (a *runtimeAdapter) LoadModel(ctx context.Context, id string, plan recipes.Plan) (*dispatcher.LoadResult, error) {
+func (a *runtimeAdapter) LoadModel(ctx context.Context, id string, plan recipes.Plan) (*runtime.LoadResult, error) {
 	res, err := a.r.LoadModel(ctx, id, plan)
 	if err != nil {
 		return nil, err
 	}
-	return &dispatcher.LoadResult{EndpointURL: res.EndpointURL}, nil
+	return &runtime.LoadResult{EndpointURL: res.EndpointURL}, nil
 }
 func (a *runtimeAdapter) UnloadModel(ctx context.Context, id string) error {
 	return a.r.UnloadModel(ctx, id)
 }
 func (a *runtimeAdapter) LoadedDeployments() []string { return a.r.LoadedDeployments() }
+func (a *runtimeAdapter) DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool) {
+	return a.r.DeploymentInfo(deploymentID)
+}
+func (a *runtimeAdapter) EndpointURL(deploymentID string) string { return a.r.EndpointURL(deploymentID) }
 
 // hostTelemetry reads CPU/memory/GPU from the host.
 type hostTelemetry struct{}
