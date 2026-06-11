@@ -29,6 +29,7 @@ type Plan struct {
 	ContainerPort int               // port the model server listens on inside the container
 	HostPort      int               // port to bind on the host (chosen by the worker)
 	GPUIndices    []int             // GPU device indices to pass to --gpus
+	ShmSize       int64             // shared memory size in bytes; 0 = daemon default (64 MB)
 	ReadyPath     string            // HTTP path used for readiness probe (200 means ready)
 }
 
@@ -83,6 +84,12 @@ var allowedConfigKeys = map[string]struct{}{
 	"max_batch_size":         {},
 	"max_input_length":       {},
 	"max_total_tokens":       {},
+	// SGLang-specific keys
+	"attention_backend":    {},
+	"sampling_backend":     {},
+	"mem_fraction_static":  {},
+	"chunked_prefill_size": {},
+	"max_running_requests": {},
 }
 
 // Allowed URI schemes (mirrors spec_builder.py).
@@ -102,6 +109,7 @@ var uriPattern = regexp.MustCompile(`^[a-z][a-z0-9+\-.]*://[^\x00-\x1f` + "`" + 
 var registry = map[string]Recipe{
 	"vllm":              vllmRecipe{image: "docker.io/vllm/vllm-openai:v0.22.1", port: 8000, readyPath: "/health"},
 	"vllm-omni":         vllmRecipe{image: "docker.io/vllm/vllm-omni:v0.11.0rc1", port: 8000, readyPath: "/health"},
+	"sglang":            sglangRecipe{image: "lmsysorg/sglang:latest-runtime", port: 30000, readyPath: "/health"},
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},
 	"triton":            tritonRecipe{image: "nvcr.io/nvidia/tritonserver:latest", port: 8000, readyPath: "/v2/health/ready"},

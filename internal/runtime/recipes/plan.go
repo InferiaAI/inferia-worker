@@ -22,6 +22,7 @@ type ContainerPlan struct {
 	Mounts        []Mount
 	ContainerPort int
 	GPUIndices    []int
+	ShmSize       int64
 	ReadyPath     string
 	Role          KvRole
 	ReplicaIdx    int
@@ -40,6 +41,7 @@ func (cp ContainerPlan) ToPlan(containerName string, hostPort int) Plan {
 		ContainerPort: cp.ContainerPort,
 		HostPort:      hostPort,
 		GPUIndices:    cp.GPUIndices,
+		ShmSize:       cp.ShmSize,
 		ReadyPath:     cp.ReadyPath,
 	}
 }
@@ -51,6 +53,10 @@ type DeploymentPlan struct {
 	Model        string
 	Prefill      []ContainerPlan
 	Decode       []ContainerPlan
+	// ContainerPrefix is used by the runtime to name containers,
+	// e.g. "<prefix>-p-<id>-<i>". If empty, defaults to "inferia-vllm"
+	// for backward compatibility.
+	ContainerPrefix string
 }
 
 // MultiContainerBuilder is the interface a recipe satisfies when it

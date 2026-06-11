@@ -181,6 +181,7 @@ func (e *dockerEngine) Create(ctx context.Context, spec *ContainerSpec) (string,
 	hostCfg := &container.HostConfig{
 		PortBindings:  portMap,
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)},
+		ShmSize:       spec.ShmSize,
 	}
 	if len(spec.Mounts) > 0 {
 		hostCfg.Mounts = make([]mount.Mount, len(spec.Mounts))

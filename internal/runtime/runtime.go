@@ -344,6 +344,11 @@ func (r *Runtime) LoadDeploymentGroup(ctx context.Context, plan recipes.Deployme
 		Decode:  make([]ContainerInfo, len(plan.Decode)),
 	}
 
+	prefix := plan.ContainerPrefix
+	if prefix == "" {
+		prefix = "inferia-vllm" // backward compat
+	}
+
 	register := func(info *ContainerInfo, cp recipes.ContainerPlan, port int) {
 		info.HostPort = port
 		info.Role = cp.Role
@@ -365,7 +370,7 @@ func (r *Runtime) LoadDeploymentGroup(ctx context.Context, plan recipes.Deployme
 			r.rollbackGroup(ctx, group, i, 0)
 			return nil, fmt.Errorf("prefill port %d: %w", i, err)
 		}
-		name := fmt.Sprintf("inferia-vllm-p-%s-%d", plan.DeploymentID, i)
+		name := fmt.Sprintf("%s-p-%s-%d", prefix, plan.DeploymentID, i)
 		p := cp.ToPlan(name, hostPort)
 		cid, err := r.createAndStartContainer(ctx, p)
 		if err != nil {
@@ -384,7 +389,7 @@ func (r *Runtime) LoadDeploymentGroup(ctx context.Context, plan recipes.Deployme
 			r.rollbackGroup(ctx, group, len(plan.Prefill), i)
 			return nil, fmt.Errorf("decode port %d: %w", i, err)
 		}
-		name := fmt.Sprintf("inferia-vllm-d-%s-%d", plan.DeploymentID, i)
+		name := fmt.Sprintf("%s-d-%s-%d", prefix, plan.DeploymentID, i)
 		p := cp.ToPlan(name, hostPort)
 		cid, err := r.createAndStartContainer(ctx, p)
 		if err != nil {

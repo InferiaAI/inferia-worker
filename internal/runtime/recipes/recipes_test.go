@@ -6,7 +6,7 @@ import (
 )
 
 func TestRegistry_KnownRecipes(t *testing.T) {
-	want := []string{"vllm", "ollama", "vllm-omni", "infinity", "triton", "inferia-diffusion"}
+	want := []string{"vllm", "ollama", "vllm-omni", "sglang", "infinity", "triton", "inferia-diffusion"}
 	for _, name := range want {
 		if _, err := Get(name); err != nil {
 			t.Errorf("Get(%q): %v", name, err)
@@ -25,7 +25,7 @@ func TestRegistry_UnknownRecipe(t *testing.T) {
 
 func TestRegistry_Names_Sorted(t *testing.T) {
 	names := Names()
-	if len(names) != 6 {
+	if len(names) != 7 {
 		t.Fatalf("got %d names", len(names))
 	}
 	prev := ""
@@ -427,7 +427,7 @@ func TestPrepareRejectsZeroGPUsForGpuOnlyEngines(t *testing.T) {
 	}
 	// triton and inferia-diffusion are also GPU-only; check them too so a
 	// future refactor that drops requireGPU from any of them is caught here.
-	for _, name := range []string{"triton", "inferia-diffusion", "vllm-omni"} {
+	for _, name := range []string{"triton", "inferia-diffusion", "vllm-omni", "sglang"} {
 		r, err := Get(name)
 		if err != nil {
 			t.Fatalf("Get(%q): %v", name, err)

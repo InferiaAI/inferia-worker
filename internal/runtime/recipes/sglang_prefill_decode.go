@@ -3,26 +3,24 @@ package recipes
 import (
 	"fmt"
 
-	"github.com/inferia/inferia-worker/internal/config/vllm"
+	"github.com/inferia/inferia-worker/internal/config/sglang"
 )
 
 func init() {
-	multiRegistry["vllm-prefill-decode"] = vllmPrefillDecodeRecipe{
-		image:     "docker.io/vllm/vllm-openai:v0.22.1",
-		port:      8000,
+	multiRegistry["sglang-prefill-decode"] = sglangPrefillDecodeRecipe{
+		image:     "lmsysorg/sglang:latest-runtime",
+		port:      30000,
 		readyPath: "/health",
 	}
 }
 
-// vllmPrefillDecodeRecipe implements MultiContainerBuilder for disagg
-// prefill/decode deployments with Mooncake shared KV cache.
-type vllmPrefillDecodeRecipe struct {
+type sglangPrefillDecodeRecipe struct {
 	image     string
 	port      int
 	readyPath string
 }
 
-func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentPlan, error) {
+func (r sglangPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentPlan, error) {
 	if err := validate(in); err != nil {
 		return DeploymentPlan{}, err
 	}
@@ -42,11 +40,8 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 	model := stripScheme(in.ArtifactURI)
 	cfg := sanitiseConfig(in.Config)
 
-	// ----- GPU-aware default flags -----
-	envDefaults := map[string]string{
-		"CUDA_MODULE_LOADING": "LAZY",
-	}
-	gpuCfg, gpuEnv := vllm.GPUOptimalConfig(in.GPUName, in.GPUMemoryMiB, len(in.GPUIndices))
+	envDefaults := map[string]string{}
+	gpuCfg, gpuEnv := sglang.GPUOptimalConfig(in.GPUName, in.GPUMemoryMiB, len(in.GPUIndices))
 	for k, v := range gpuCfg {
 		if _, ok := cfg[k]; !ok {
 			cfg[k] = v
@@ -55,27 +50,24 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 	for k, v := range gpuEnv {
 		envDefaults[k] = v
 	}
-	envDefaults["LD_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
 
 	baseCmd := []string{
-		model,
-		"--served-model-name", model,
+		"python3", "-m", "sglang.launch_server",
+		"--model-path", model,
 		"--host", "0.0.0.0",
 		"--port", fmt.Sprintf("%d", r.port),
 	}
 	for _, k := range []string{
-		"tensor_parallel_size", "pipeline_parallel_size",
-		"dtype", "max_model_len", "max_num_seqs",
-		"gpu_memory_utilization", "quantization",
-		"max_batch_size", "max_input_length", "max_total_tokens",
-		"kv_cache_dtype", "max_num_batched_tokens",
+		"tensor_parallel_size",
+		"dtype", "kv_cache_dtype",
+		"attention_backend", "sampling_backend",
+		"mem_fraction_static", "chunked_prefill_size",
+		"quantization",
+		"max_model_len", "max_running_requests", "max_total_tokens",
 	} {
 		if v, ok := cfg[k]; ok {
 			baseCmd = append(baseCmd, dashed(k), cliArg(v))
 		}
-	}
-	if v, ok := cfg["enforce_eager"].(bool); ok && v {
-		baseCmd = append(baseCmd, "--enforce-eager")
 	}
 	if v, ok := cfg["enable_prefix_caching"].(bool); ok && v {
 		baseCmd = append(baseCmd, "--enable-prefix-caching")
@@ -86,19 +78,12 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 
 	var planMounts []Mount
 	var planEntrypoint []string
-	if vllm.MooncakeEnabled() {
-		planMounts = []Mount{{
-			Type:     "volume",
-			Source:   vllm.MooncakeConfigVolume(),
-			Target:   vllm.MooncakeConfigMountPath(),
-			ReadOnly: true,
-		}}
-		planEntrypoint = vllm.MooncakeEntrypoint()
+	if sglang.MooncakeEnabled() {
+		planEntrypoint = sglang.MooncakeEntrypoint()
 	}
 
 	env := mergeEnv(in.Env, envDefaults)
 
-	// --- prefill replicas ---
 	prefills := make([]ContainerPlan, prefillReplicas)
 	for i := range prefills {
 		pCmd := make([]string, len(baseCmd))
@@ -107,8 +92,8 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 		for k, v := range env {
 			pEnv[k] = v
 		}
-		if vllm.MooncakeEnabled() {
-			vllm.ApplyMooncakePrefillFlags(cfg, pEnv, &pCmd)
+		if sglang.MooncakeEnabled() {
+			sglang.ApplySGLangMooncakePrefillFlags(cfg, pEnv, &pCmd)
 		}
 		prefills[i] = ContainerPlan{
 			Image:         r.image,
@@ -118,13 +103,13 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 			Mounts:        planMounts,
 			ContainerPort: r.port,
 			GPUIndices:    in.GPUIndices,
+			ShmSize:       sglangShmSize,
 			ReadyPath:     r.readyPath,
 			Role:          KvRoleProducer,
 			ReplicaIdx:    i,
 		}
 	}
 
-	// --- decode replicas ---
 	decodes := make([]ContainerPlan, decodeReplicas)
 	for i := range decodes {
 		dCmd := make([]string, len(baseCmd))
@@ -133,8 +118,8 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 		for k, v := range env {
 			dEnv[k] = v
 		}
-		if vllm.MooncakeEnabled() {
-			vllm.ApplyMooncakeDecodeFlags(cfg, dEnv, &dCmd)
+		if sglang.MooncakeEnabled() {
+			sglang.ApplySGLangMooncakeDecodeFlags(cfg, dEnv, &dCmd)
 		}
 		decodes[i] = ContainerPlan{
 			Image:         r.image,
@@ -144,6 +129,7 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 			Mounts:        planMounts,
 			ContainerPort: r.port,
 			GPUIndices:    in.GPUIndices,
+			ShmSize:       sglangShmSize,
 			ReadyPath:     r.readyPath,
 			Role:          KvRoleConsumer,
 			ReplicaIdx:    i,
@@ -155,6 +141,6 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 		Model:           model,
 		Prefill:         prefills,
 		Decode:          decodes,
-		ContainerPrefix: "inferia-vllm",
+		ContainerPrefix: "inferia-sglang",
 	}, nil
 }
