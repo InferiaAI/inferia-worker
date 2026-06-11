@@ -57,6 +57,16 @@ type BuildInput struct {
 	// "not a disagg deployment" and is the default for existing recipes.
 	PrefillReplicas int `json:"prefill_replicas,omitempty"`
 	DecodeReplicas  int `json:"decode_replicas,omitempty"`
+
+	// PrefillGPUIndices and DecodeGPUIndices override GPUIndices for the
+	// respective role in a disagg deployment. When non-empty, the recipe
+	// assigns these device sets instead of the full GPUIndices slice.
+	PrefillGPUIndices []int `json:"prefill_gpu_indices,omitempty"`
+	DecodeGPUIndices  []int `json:"decode_gpu_indices,omitempty"`
+
+	// ShmSize overrides the default shared memory size for container plans.
+	// 0 means the recipe uses its own default (recipe-specific).
+	ShmSize int64 `json:"shm_size,omitempty"`
 }
 
 // Recipe builds a Plan for a particular engine/runtime.
@@ -134,6 +144,26 @@ func Names() []string {
 	sort.Strings(out)
 	return out
 }
+
+// MultiContainerBuilder is the interface a recipe satisfies when it
+// produces multiple container plans (e.g. vllm-prefill-decode).
+// The dispatcher type-asserts Recipe to this interface to detect
+// disagg deployments.
+type MultiContainerBuilder interface {
+	BuildDeploymentPlan(in BuildInput) (DeploymentPlan, error)
+}
+
+// MultiGet returns the MultiContainerBuilder registered under name.
+func MultiGet(name string) (MultiContainerBuilder, error) {
+	r, ok := multiRegistry[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown multi-container recipe: %q", name)
+	}
+	return r, nil
+}
+
+// multiRegistry holds recipes that produce multiple container plans.
+var multiRegistry = map[string]MultiContainerBuilder{}
 
 // validate runs shared input checks. Recipes call this first.
 //

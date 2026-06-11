@@ -82,6 +82,20 @@ func (r sglangPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (Deploymen
 		planEntrypoint = sglang.MooncakeEntrypoint()
 	}
 
+	prefillGPUIndices := in.PrefillGPUIndices
+	if len(prefillGPUIndices) == 0 {
+		prefillGPUIndices = in.GPUIndices
+	}
+	decodeGPUIndices := in.DecodeGPUIndices
+	if len(decodeGPUIndices) == 0 {
+		decodeGPUIndices = in.GPUIndices
+	}
+
+	shmSize := in.ShmSize
+	if shmSize == 0 {
+		shmSize = sglangShmSize
+	}
+
 	env := mergeEnv(in.Env, envDefaults)
 
 	prefills := make([]ContainerPlan, prefillReplicas)
@@ -102,8 +116,8 @@ func (r sglangPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (Deploymen
 			Env:           pEnv,
 			Mounts:        planMounts,
 			ContainerPort: r.port,
-			GPUIndices:    in.GPUIndices,
-			ShmSize:       sglangShmSize,
+			GPUIndices:    prefillGPUIndices,
+			ShmSize:       shmSize,
 			ReadyPath:     r.readyPath,
 			Role:          KvRoleProducer,
 			ReplicaIdx:    i,
@@ -128,8 +142,8 @@ func (r sglangPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (Deploymen
 			Env:           dEnv,
 			Mounts:        planMounts,
 			ContainerPort: r.port,
-			GPUIndices:    in.GPUIndices,
-			ShmSize:       sglangShmSize,
+			GPUIndices:    decodeGPUIndices,
+			ShmSize:       shmSize,
 			ReadyPath:     r.readyPath,
 			Role:          KvRoleConsumer,
 			ReplicaIdx:    i,

@@ -22,9 +22,10 @@ type fakeRT struct {
 	unloadedIDs []string
 
 	// disagg tracking
-	groupLoadCalls []recipes.DeploymentPlan
-	groupLoadErr   error
-	groupUnloaded  []string
+	groupLoadCalls  []recipes.DeploymentPlan
+	groupLoadErr    error
+	groupUnloadErr  error
+	groupUnloaded   []string
 }
 
 func newFakeRT() *fakeRT { return &fakeRT{loaded: map[string]string{}} }
@@ -81,6 +82,9 @@ func (f *fakeRT) LoadDeploymentGroup(ctx context.Context, plan recipes.Deploymen
 
 func (f *fakeRT) UnloadDeploymentGroup(ctx context.Context, id string) error {
 	f.groupUnloaded = append(f.groupUnloaded, id)
+	if f.groupUnloadErr != nil {
+		return f.groupUnloadErr
+	}
 	return nil
 }
 
@@ -198,10 +202,11 @@ func TestUnloadModel_HappyPath(t *testing.T) {
 
 func TestUnloadModel_RuntimeError(t *testing.T) {
 	rt := newFakeRT()
-	rt.unloadErr = errors.New("stop boom")
+	rt.unloadErr = errors.New("single stop boom")
+	rt.groupUnloadErr = errors.New("disagg stop boom")
 	d := &Dispatcher{Rt: rt}
 	if err := d.UnloadModel(context.Background(), control.UnloadModelBody{DeploymentID: "x"}); err == nil {
-		t.Errorf("expected error")
+		t.Errorf("expected error when both paths fail")
 	}
 }
 

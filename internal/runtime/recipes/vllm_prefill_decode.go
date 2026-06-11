@@ -96,6 +96,20 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 		planEntrypoint = vllm.MooncakeEntrypoint()
 	}
 
+	prefillGPUIndices := in.PrefillGPUIndices
+	if len(prefillGPUIndices) == 0 {
+		prefillGPUIndices = in.GPUIndices
+	}
+	decodeGPUIndices := in.DecodeGPUIndices
+	if len(decodeGPUIndices) == 0 {
+		decodeGPUIndices = in.GPUIndices
+	}
+
+	shmSize := in.ShmSize
+	if shmSize == 0 && vllm.MooncakeEnabled() {
+		shmSize = 32 * 1024 * 1024 * 1024 // 32 GB for Mooncake KV transfer
+	}
+
 	env := mergeEnv(in.Env, envDefaults)
 
 	// --- prefill replicas ---
@@ -117,7 +131,8 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 			Env:           pEnv,
 			Mounts:        planMounts,
 			ContainerPort: r.port,
-			GPUIndices:    in.GPUIndices,
+			GPUIndices:    prefillGPUIndices,
+			ShmSize:       shmSize,
 			ReadyPath:     r.readyPath,
 			Role:          KvRoleProducer,
 			ReplicaIdx:    i,
@@ -143,7 +158,8 @@ func (r vllmPrefillDecodeRecipe) BuildDeploymentPlan(in BuildInput) (DeploymentP
 			Env:           dEnv,
 			Mounts:        planMounts,
 			ContainerPort: r.port,
-			GPUIndices:    in.GPUIndices,
+			GPUIndices:    decodeGPUIndices,
+			ShmSize:       shmSize,
 			ReadyPath:     r.readyPath,
 			Role:          KvRoleConsumer,
 			ReplicaIdx:    i,

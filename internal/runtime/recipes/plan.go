@@ -1,7 +1,5 @@
 package recipes
 
-import "fmt"
-
 // KvRole is the mooncake KV cache role assigned to a container in a
 // disagg deployment group.
 type KvRole string
@@ -58,23 +56,3 @@ type DeploymentPlan struct {
 	// for backward compatibility.
 	ContainerPrefix string
 }
-
-// MultiContainerBuilder is the interface a recipe satisfies when it
-// produces multiple container plans (e.g. vllm-prefill-decode).
-// The dispatcher type-asserts Recipe to this interface to detect
-// disagg deployments.
-type MultiContainerBuilder interface {
-	BuildDeploymentPlan(in BuildInput) (DeploymentPlan, error)
-}
-
-// MultiGet returns the MultiContainerBuilder registered under name.
-func MultiGet(name string) (MultiContainerBuilder, error) {
-	r, ok := multiRegistry[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown multi-container recipe: %q", name)
-	}
-	return r, nil
-}
-
-// multiRegistry holds recipes that produce multiple container plans.
-var multiRegistry = map[string]MultiContainerBuilder{}
