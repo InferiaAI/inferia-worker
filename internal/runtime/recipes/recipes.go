@@ -22,12 +22,23 @@ import (
 type Plan struct {
 	Image         string
 	ContainerName string
-	Cmd           []string          // CMD/args; runs with the image's default entrypoint
+	Cmd           []string          // CMD/args; when Entrypoint is nil the image's default entrypoint is used
+	Entrypoint    []string          // overrides the image entrypoint; nil → use image default (preferred)
 	Env           map[string]string // env passed to the container
+	Mounts        []Mount           // volume/bind mounts
 	ContainerPort int               // port the model server listens on inside the container
 	HostPort      int               // port to bind on the host (chosen by the worker)
 	GPUIndices    []int             // GPU device indices to pass to --gpus
+	ShmSize       int64             // shared memory size in bytes; 0 = daemon default (64 MB)
 	ReadyPath     string            // HTTP path used for readiness probe (200 means ready)
+}
+
+// Mount describes a Docker volume or bind mount.
+type Mount struct {
+	Type     string // "volume" or "bind"
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // BuildInput is what the worker passes when constructing a plan.
@@ -40,6 +51,22 @@ type BuildInput struct {
 	Env          map[string]string
 	GPUName      string // populated by dispatcher from telemetry.ReadGPU()
 	GPUMemoryMiB uint64 // populated by dispatcher from telemetry.ReadGPU()
+
+	// PrefillReplicas and DecodeReplicas are used only by multi-container
+	// recipes (vllm-prefill-decode) to specify replica counts. Zero means
+	// "not a disagg deployment" and is the default for existing recipes.
+	PrefillReplicas int `json:"prefill_replicas,omitempty"`
+	DecodeReplicas  int `json:"decode_replicas,omitempty"`
+
+	// PrefillGPUIndices and DecodeGPUIndices override GPUIndices for the
+	// respective role in a disagg deployment. When non-empty, the recipe
+	// assigns these device sets instead of the full GPUIndices slice.
+	PrefillGPUIndices []int `json:"prefill_gpu_indices,omitempty"`
+	DecodeGPUIndices  []int `json:"decode_gpu_indices,omitempty"`
+
+	// ShmSize overrides the default shared memory size for container plans.
+	// 0 means the recipe uses its own default (recipe-specific).
+	ShmSize int64 `json:"shm_size,omitempty"`
 }
 
 // Recipe builds a Plan for a particular engine/runtime.
@@ -67,6 +94,12 @@ var allowedConfigKeys = map[string]struct{}{
 	"max_batch_size":         {},
 	"max_input_length":       {},
 	"max_total_tokens":       {},
+	// SGLang-specific keys
+	"attention_backend":    {},
+	"sampling_backend":     {},
+	"mem_fraction_static":  {},
+	"chunked_prefill_size": {},
+	"max_running_requests": {},
 }
 
 // Allowed URI schemes (mirrors spec_builder.py).
@@ -86,6 +119,7 @@ var uriPattern = regexp.MustCompile(`^[a-z][a-z0-9+\-.]*://[^\x00-\x1f` + "`" + 
 var registry = map[string]Recipe{
 	"vllm":              vllmRecipe{image: "docker.io/vllm/vllm-openai:v0.22.1", port: 8000, readyPath: "/health"},
 	"vllm-omni":         vllmRecipe{image: "docker.io/vllm/vllm-omni:v0.11.0rc1", port: 8000, readyPath: "/health"},
+	"sglang":            sglangRecipe{image: "lmsysorg/sglang:latest-runtime", port: 30000, readyPath: "/health"},
 	"ollama":            ollamaRecipe{image: "docker.io/ollama/ollama:latest", port: 11434, readyPath: "/"},
 	"infinity":          infinityRecipe{image: "michaelf34/infinity:latest", port: 7997, readyPath: "/health"},
 	"triton":            tritonRecipe{image: "nvcr.io/nvidia/tritonserver:latest", port: 8000, readyPath: "/v2/health/ready"},
@@ -110,6 +144,26 @@ func Names() []string {
 	sort.Strings(out)
 	return out
 }
+
+// MultiContainerBuilder is the interface a recipe satisfies when it
+// produces multiple container plans (e.g. vllm-prefill-decode).
+// The dispatcher type-asserts Recipe to this interface to detect
+// disagg deployments.
+type MultiContainerBuilder interface {
+	BuildDeploymentPlan(in BuildInput) (DeploymentPlan, error)
+}
+
+// MultiGet returns the MultiContainerBuilder registered under name.
+func MultiGet(name string) (MultiContainerBuilder, error) {
+	r, ok := multiRegistry[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown multi-container recipe: %q", name)
+	}
+	return r, nil
+}
+
+// multiRegistry holds recipes that produce multiple container plans.
+var multiRegistry = map[string]MultiContainerBuilder{}
 
 // validate runs shared input checks. Recipes call this first.
 //

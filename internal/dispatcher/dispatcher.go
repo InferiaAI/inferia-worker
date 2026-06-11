@@ -14,6 +14,14 @@ import (
 	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
+// DeploymentRegistrar is the narrow interface the dispatcher uses to
+// register/deregister disagg deployments with the proxy registry.
+// Implemented by *inference.DeploymentRegistry.
+type DeploymentRegistrar interface {
+	RegisterDisagg(id, model string, group *runtime.DeploymentGroup)
+	Deregister(id string)
+}
+
 // Runtime defines the subset of *runtime.Runtime operations needed by the
 // dispatcher. Avoids packages importing each other recursively.
 type Runtime interface {
@@ -22,6 +30,10 @@ type Runtime interface {
 	LoadedDeployments() []string
 	DeploymentInfo(deploymentID string) (recipe, model, phase string, pullDur, startDur time.Duration, ok bool)
 	EndpointURL(deploymentID string) string
+
+	// Disagg (multi-container) lifecycle.
+	LoadDeploymentGroup(ctx context.Context, plan recipes.DeploymentPlan) (*runtime.DeploymentGroup, error)
+	UnloadDeploymentGroup(ctx context.Context, id string) error
 }
 
 // Dispatcher implements control.Dispatcher. It is the primary adapter between
@@ -32,15 +44,20 @@ type Dispatcher struct {
 	Metrics   *metrics.Collector
 	GPUName   string
 	GPUMemMiB uint64
+	TotalGPUs int                // total physical GPUs on the host
+	Registry  DeploymentRegistrar // optional; nil = no disagg support
+	Allocator *GPUAllocator       // optional; nil = no GPU tracking
 }
 
-func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64) *Dispatcher {
+func NewDispatcher(rt Runtime, tel TelemetryReader, mc *metrics.Collector, gpuName string, gpuMem uint64, totalGPUs int) *Dispatcher {
 	return &Dispatcher{
 		Rt:        rt,
 		Telemetry: tel,
 		Metrics:   mc,
 		GPUName:   gpuName,
 		GPUMemMiB: gpuMem,
+		TotalGPUs: totalGPUs,
+		Allocator: NewGPUAllocator(totalGPUs),
 	}
 }
 
@@ -59,11 +76,30 @@ type TelemetryReader interface {
 // LoadModel converts the WS body into a recipes.Plan and asks the runtime to
 // load it. Returning a non-nil error becomes CommandResult{status:"failed"}
 // in the control package.
+//
+// When body.Recipe names a MultiContainerBuilder and body.PrefillReplicas > 0,
+// it routes to the disagg (multi-container) path instead.
 func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) (string, error) {
+	// Disagg path: multi-container prefill/decode split.
+	if body.PrefillReplicas > 0 {
+		mc, err := recipes.MultiGet(body.Recipe)
+		if err != nil {
+			return "", err
+		}
+		return d.loadDeploymentGroup(ctx, mc, body)
+	}
+
+	// Single-container path — unchanged.
 	r, err := recipes.Get(body.Recipe)
 	if err != nil {
 		return "", err
 	}
+
+	gpuIndices := body.GPUIndices
+	if d.Allocator != nil {
+		gpuIndices = d.Allocator.Allocate(body.DeploymentID, body.GPUIndices)
+	}
+
 	port := body.Port
 	if port == 0 {
 		// recipes.BuildPlan rejects HostPort=0, so use a placeholder and let
@@ -74,7 +110,7 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 		DeploymentID: body.DeploymentID,
 		ArtifactURI:  body.Model.ArtifactURI,
 		Config:       body.Config,
-		GPUIndices:   body.GPUIndices,
+		GPUIndices:   gpuIndices,
 		HostPort:     port,
 		Env:          body.Env,
 		GPUName:      d.GPUName,
@@ -93,13 +129,77 @@ func (d *Dispatcher) LoadModel(ctx context.Context, body control.LoadModelBody) 
 	return res.EndpointURL, nil
 }
 
-// UnloadModel is a direct passthrough.
+// loadDeploymentGroup builds and launches a disagg deployment group, then
+// registers it with the proxy registry.
+func (d *Dispatcher) loadDeploymentGroup(ctx context.Context, mc recipes.MultiContainerBuilder, body control.LoadModelBody) (string, error) {
+	prefillDesired := body.PrefillGPUIndices
+	if len(prefillDesired) == 0 {
+		prefillDesired = body.GPUIndices
+	}
+	decodeDesired := body.DecodeGPUIndices
+	if len(decodeDesired) == 0 {
+		decodeDesired = body.GPUIndices
+	}
+
+	prefillGPUs := prefillDesired
+	decodeGPUs := decodeDesired
+	if d.Allocator != nil {
+		prefillGPUs = d.Allocator.Allocate(body.DeploymentID+"/prefill", prefillDesired)
+		decodeGPUs = d.Allocator.Allocate(body.DeploymentID+"/decode", decodeDesired)
+	}
+
+	plan, err := mc.BuildDeploymentPlan(recipes.BuildInput{
+		DeploymentID:       body.DeploymentID,
+		ArtifactURI:        body.Model.ArtifactURI,
+		Config:             body.Config,
+		GPUIndices:         body.GPUIndices,
+		PrefillGPUIndices:  prefillGPUs,
+		DecodeGPUIndices:   decodeGPUs,
+		HostPort:           1, // placeholder — runtime allocates per-container
+		Env:                body.Env,
+		GPUName:            d.GPUName,
+		GPUMemoryMiB:       d.GPUMemMiB,
+		PrefillReplicas:    body.PrefillReplicas,
+		DecodeReplicas:     body.DecodeReplicas,
+	})
+	if err != nil {
+		return "", err
+	}
+	group, err := d.Rt.LoadDeploymentGroup(ctx, plan)
+	if err != nil {
+		return "", err
+	}
+	if d.Registry != nil {
+		d.Registry.RegisterDisagg(body.DeploymentID, plan.Model, group)
+	}
+	if len(group.Prefill) == 0 {
+		return "", fmt.Errorf("deployment %s: no prefill containers started", plan.DeploymentID)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", group.Prefill[0].HostPort), nil
+}
+
+// UnloadModel stops and removes a deployment. It tries both the disagg group
+// path and the single-container path — if either succeeded the deployment is
+// gone and metrics are cleaned up. Only returns an error when both paths
+// report "not found", indicating the ID was never loaded.
 func (d *Dispatcher) UnloadModel(ctx context.Context, body control.UnloadModelBody) error {
-	err := d.Rt.UnloadModel(ctx, body.DeploymentID)
-	if err == nil && d.Metrics != nil {
+	if d.Registry != nil {
+		d.Registry.Deregister(body.DeploymentID)
+	}
+	if d.Allocator != nil {
+		d.Allocator.Release(body.DeploymentID)
+		d.Allocator.Release(body.DeploymentID + "/prefill")
+		d.Allocator.Release(body.DeploymentID + "/decode")
+	}
+	disaggErr := d.Rt.UnloadDeploymentGroup(ctx, body.DeploymentID)
+	singleErr := d.Rt.UnloadModel(ctx, body.DeploymentID)
+	if disaggErr != nil && singleErr != nil {
+		return singleErr
+	}
+	if d.Metrics != nil {
 		d.Metrics.RemoveDeployment(body.DeploymentID)
 	}
-	return err
+	return nil
 }
 
 func (d *Dispatcher) HeartbeatSnapshot() control.HeartbeatBody {

@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/inferia/inferia-worker/internal/runtime"
+	"github.com/inferia/inferia-worker/internal/runtime/recipes"
 )
 
 // fakeRuntime implements EndpointResolver for the proxy tests.
@@ -271,4 +274,209 @@ func TestProxy_AbortsOnCtxCancel(t *testing.T) {
 	_, _ = app.Test(req, 1000)
 	// We're not asserting the exact status — Fiber may close — only that the
 	// proxy did not hang the test.
+}
+
+// --- Disagg proxy tests ------------------------------------------------------
+
+func TestProxy_DisaggRouting(t *testing.T) {
+	// Phase-1 server (prefill): expects stream=false, max_tokens=1,
+	// kv_transfer_params with do_remote_decode=true, request_id present.
+	pCalled := false
+	var sharedRequestID string
+	pServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pCalled = true
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		// Must have been modified for prefill
+		if s, ok := req["stream"].(bool); !ok || s != false {
+			t.Errorf("prefill: stream=%v, want false", req["stream"])
+		}
+		if mt, ok := req["max_tokens"].(float64); !ok || mt != 1 {
+			t.Errorf("prefill: max_tokens=%v, want 1", req["max_tokens"])
+		}
+		// Must have kv_transfer_params structure (not top-level do_remote_decode)
+		ktp, ok := req["kv_transfer_params"].(map[string]any)
+		if !ok {
+			t.Errorf("prefill: missing kv_transfer_params map")
+		} else {
+			if dr, ok := ktp["do_remote_decode"].(bool); !ok || dr != true {
+				t.Errorf("prefill: kv_transfer_params.do_remote_decode=%v, want true", ktp["do_remote_decode"])
+			}
+			if drp, ok := ktp["do_remote_prefill"].(bool); !ok || drp != false {
+				t.Errorf("prefill: kv_transfer_params.do_remote_prefill=%v, want false", ktp["do_remote_prefill"])
+			}
+		}
+		// Must have request_id in body
+		rid, ok := req["request_id"].(string)
+		if !ok || rid == "" {
+			t.Errorf("prefill: missing or empty request_id")
+		}
+		sharedRequestID = rid
+		// Must have X-Request-Id header matching body
+		if r.Header.Get("X-Request-Id") != rid {
+			t.Errorf("prefill: X-Request-Id header=%q, want %q", r.Header.Get("X-Request-Id"), rid)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"kv_transfer_params":{"engine_id":"e1","block_ids":[1,2,3]}}`)
+	}))
+	defer pServer.Close()
+
+	// Phase-2 server (decode): expects original body + kv_transfer_params injected
+	// and matching request_id.
+	dCalled := false
+	dServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dCalled = true
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		// Must have stream=true (preserved from original)
+		if s, ok := req["stream"].(bool); !ok || s != true {
+			t.Errorf("decode: stream=%v, want true", req["stream"])
+		}
+		// Must have max_tokens=4096 (preserved from original)
+		if mt, ok := req["max_tokens"].(float64); !ok || mt != 4096 {
+			t.Errorf("decode: max_tokens=%v, want 4096", req["max_tokens"])
+		}
+		// Must have kv_transfer_params from prefill
+		if _, ok := req["kv_transfer_params"]; !ok {
+			t.Errorf("decode: missing kv_transfer_params")
+		}
+		// Must have matching request_id
+		rid, ok := req["request_id"].(string)
+		if !ok || rid == "" {
+			t.Errorf("decode: missing or empty request_id")
+		}
+		if rid != sharedRequestID {
+			t.Errorf("decode: request_id=%q, want %q (same as prefill)", rid, sharedRequestID)
+		}
+		if r.Header.Get("X-Request-Id") != rid {
+			t.Errorf("decode: X-Request-Id header=%q, want %q", r.Header.Get("X-Request-Id"), rid)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-disagg","choices":[{"text":"Hello from D"}]}`)
+	}))
+	defer dServer.Close()
+
+	// Parse upstream URLs to extract ports
+	pURL := strings.TrimPrefix(pServer.URL, "http://127.0.0.1:")
+	dURL := strings.TrimPrefix(dServer.URL, "http://127.0.0.1:")
+	pPort, dPort := 0, 0
+	fmt.Sscanf(pURL, "%d", &pPort)
+	fmt.Sscanf(dURL, "%d", &dPort)
+
+	reg := NewDeploymentRegistry()
+	reg.RegisterDisagg("dep-disagg-1", "mymodel", &runtime.DeploymentGroup{
+		ID: "dep-disagg-1",
+		Prefill: []runtime.ContainerInfo{
+			{HostPort: pPort, Role: recipes.KvRoleProducer, ReplicaIdx: 0},
+		},
+		Decode: []runtime.ContainerInfo{
+			{HostPort: dPort, Role: recipes.KvRoleConsumer, ReplicaIdx: 0},
+		},
+	})
+
+	app := fiber.New()
+	app.Use(NewProxy(Config{
+		Resolver: PathResolver{Resolver: func(c *fiber.Ctx) string { return "dep-disagg-1" }},
+		Registry: reg,
+	}))
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"mymodel","stream":true,"max_tokens":4096}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if !pCalled {
+		t.Error("prefill server was never called")
+	}
+	if !dCalled {
+		t.Error("decode server was never called")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Hello from D") {
+		t.Errorf("response body=%q", string(body))
+	}
+}
+
+func TestProxy_DisaggRegistryNilFallsThrough(t *testing.T) {
+	// When no registry is set, the proxy must take the legacy single-endpoint path.
+	up := startUpstream(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"id":"legacy"}`)
+	})
+	defer up.Close()
+
+	rt := &fakeRuntime{endpoints: map[string]string{"dep-1": up.URL}}
+	app := fiber.New()
+	app.Use(NewProxy(Config{
+		Runtime:  rt,
+		Resolver: PathResolver{Resolver: func(c *fiber.Ctx) string { return "dep-1" }},
+		// Registry is nil — legacy path
+	}))
+
+	req := httptest.NewRequest("GET", "/v1/completions",
+		strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, string(body))
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "legacy") {
+		t.Errorf("body=%q", string(body))
+	}
+}
+
+func TestProxy_DisaggEntryNotFoundFallsThrough(t *testing.T) {
+	// When the registry has no entry for the deployment, falls through
+	// to the legacy path.
+	up := startUpstream(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"id":"legacy"}`)
+	})
+	defer up.Close()
+
+	reg := NewDeploymentRegistry() // empty registry
+	rt := &fakeRuntime{endpoints: map[string]string{"dep-1": up.URL}}
+	app := fiber.New()
+	app.Use(NewProxy(Config{
+		Runtime:  rt,
+		Resolver: PathResolver{Resolver: func(c *fiber.Ctx) string { return "dep-1" }},
+		Registry: reg,
+	}))
+
+	req := httptest.NewRequest("GET", "/v1/completions",
+		strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, string(body))
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "legacy") {
+		t.Errorf("body=%q", string(body))
+	}
 }

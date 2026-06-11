@@ -19,13 +19,25 @@ type ContainerSpec struct {
 	Name            string
 	Image           string
 	Cmd             []string
+	Entrypoint      []string // overrides image entrypoint; nil → use image default
 	Env             map[string]string
+	Mounts          []Mount
 	PortBinding     PortBinding
 	NetworkName     string
 	RestartPolicy   string
 	Labels          map[string]string
 	GPUDeviceIDs    []string
 	GPUCapabilities [][]string // capability groups; each group is ANDed, groups are ORed
+	ShmSize         int64       // shared memory in bytes; 0 = daemon default
+}
+
+// Mount mirrors recipes.Mount in dockerclient types to avoid importing
+// the recipes package into client tests.
+type Mount struct {
+	Type     string
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // PortBinding describes one host:container port mapping. We always bind to
@@ -61,11 +73,23 @@ func BuildContainerSpec(p recipes.Plan, networkName string) (*ContainerSpec, err
 		"inferia.deployment_id": labelDeploymentID(p.ContainerName),
 	}
 
+	mounts := make([]Mount, len(p.Mounts))
+	for i, m := range p.Mounts {
+		mounts[i] = Mount{
+			Type:     m.Type,
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		}
+	}
+
 	return &ContainerSpec{
-		Name:  p.ContainerName,
-		Image: p.Image,
-		Cmd:   p.Cmd,
-		Env:   p.Env,
+		Name:        p.ContainerName,
+		Image:       p.Image,
+		Cmd:         p.Cmd,
+		Entrypoint:  p.Entrypoint,
+		Env:         p.Env,
+		Mounts:      mounts,
 		PortBinding: PortBinding{
 			HostIP:        "127.0.0.1",
 			HostPort:      strconv.Itoa(p.HostPort),
@@ -76,6 +100,7 @@ func BuildContainerSpec(p recipes.Plan, networkName string) (*ContainerSpec, err
 		Labels:          labels,
 		GPUDeviceIDs:    deviceIDs,
 		GPUCapabilities: [][]string{{"gpu"}},
+		ShmSize:         p.ShmSize,
 	}, nil
 }
 
@@ -86,7 +111,7 @@ func labelDeploymentID(containerName string) string {
 	// Container names look like inferia-vllm-<dep-id>; we strip the prefix
 	// "inferia-<recipe>-".
 	prefixes := []string{
-		"inferia-vllm-", "inferia-ollama-", "inferia-infinity-",
+		"inferia-vllm-", "inferia-sglang-", "inferia-ollama-", "inferia-infinity-",
 		"inferia-triton-", "inferia-diff-",
 	}
 	for _, p := range prefixes {

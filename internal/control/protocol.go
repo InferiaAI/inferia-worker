@@ -116,6 +116,18 @@ type LoadModelBody struct {
 	GPUIndices   []int             `json:"gpu_indices"`
 	Port         int               `json:"port,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
+
+	// PrefillReplicas and DecodeReplicas are used by disagg (prefill/decode
+	// split) deployments. Zero means "single-container" and is compatible
+	// with existing control planes that never send these fields.
+	PrefillReplicas int `json:"prefill_replicas,omitempty"`
+	DecodeReplicas  int `json:"decode_replicas,omitempty"`
+
+	// PrefillGPUIndices and DecodeGPUIndices optionally restrict which GPU
+	// devices each role uses in a disagg deployment. Empty = use GPUIndices
+	// as-is for all roles.
+	PrefillGPUIndices []int `json:"prefill_gpu_indices,omitempty"`
+	DecodeGPUIndices  []int `json:"decode_gpu_indices,omitempty"`
 }
 
 // ModelRef points at an artifact.
