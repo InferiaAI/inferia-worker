@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
@@ -27,6 +28,9 @@ type Client interface {
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeoutSeconds int) error
 	Remove(ctx context.Context, containerID string) error
+	// RemoveImage frees disk space by removing the pulled image after the
+	// container is running. Best-effort; failure is non-fatal.
+	RemoveImage(ctx context.Context, image string) error
 	// RemoveByName force-removes a container identified by NAME (not ID). A
 	// missing container is a no-op (returns nil). Used to clear a stale
 	// container occupying a deployment's fixed name before (re)creating it, so
@@ -174,23 +178,35 @@ func (e *dockerEngine) Create(ctx context.Context, spec *ContainerSpec) (string,
 	}
 
 	cfg := &container.Config{
-		Image:        spec.Image,
-		Cmd:          spec.Cmd,
-		Env:          envSlice,
+		Image:       spec.Image,
+		Cmd:         spec.Cmd,
+		Entrypoint:  spec.Entrypoint,
+		Env:         envSlice,
 		ExposedPorts: exposed,
-		Labels:       spec.Labels,
+		Labels:      spec.Labels,
 	}
 
 	hostCfg := &container.HostConfig{
 		PortBindings:  portMap,
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyMode(spec.RestartPolicy)},
+		ShmSize:       spec.ShmSize,
+	}
+	if len(spec.Mounts) > 0 {
+		hostCfg.Mounts = make([]mount.Mount, len(spec.Mounts))
+		for i, m := range spec.Mounts {
+			hostCfg.Mounts[i] = mount.Mount{
+				Type:     mount.Type(m.Type),
+				Source:   m.Source,
+				Target:   m.Target,
+				ReadOnly: m.ReadOnly,
+			}
+		}
 	}
 	if len(spec.GPUDeviceIDs) > 0 {
 		hostCfg.Resources.DeviceRequests = []container.DeviceRequest{
 			{
-				Driver:       "nvidia",
-				DeviceIDs:    spec.GPUDeviceIDs,
-				Capabilities: spec.GPUCapabilities,
+				Driver:    "cdi",
+				DeviceIDs: spec.GPUDeviceIDs,
 			},
 		}
 	}
@@ -219,6 +235,11 @@ func (e *dockerEngine) Stop(ctx context.Context, id string, timeoutSeconds int) 
 
 func (e *dockerEngine) Remove(ctx context.Context, id string) error {
 	return e.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+}
+
+func (e *dockerEngine) RemoveImage(ctx context.Context, img string) error {
+	_, err := e.cli.ImageRemove(ctx, img, image.RemoveOptions{Force: true})
+	return err
 }
 
 func (e *dockerEngine) RemoveByName(ctx context.Context, name string) error {
