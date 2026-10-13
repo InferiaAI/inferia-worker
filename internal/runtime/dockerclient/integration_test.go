@@ -145,3 +145,31 @@ func TestIntegration_EnsureNetworkIdempotent(t *testing.T) {
 		t.Errorf("second call should be ok, got %v", err)
 	}
 }
+
+// ImageExists must answer false for a missing image rather than erroring, so
+// the runtime can tell "not here" apart from "cannot ask".
+func TestImageExistsAgainstRealDaemon(t *testing.T) {
+	c := realEngine(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	present, err := c.ImageExists(ctx, "inferia/definitely-not-a-real-image:v0")
+	if err != nil {
+		t.Fatalf("a missing image must not error: %v", err)
+	}
+	if present {
+		t.Fatalf("a missing image must report false")
+	}
+
+	img := os.Getenv("TEST_PRESENT_IMAGE")
+	if img == "" {
+		t.Skip("set TEST_PRESENT_IMAGE to an image already on this host")
+	}
+	present, err = c.ImageExists(ctx, img)
+	if err != nil {
+		t.Fatalf("ImageExists(%s): %v", img, err)
+	}
+	if !present {
+		t.Fatalf("%s is on this host but ImageExists said false", img)
+	}
+}

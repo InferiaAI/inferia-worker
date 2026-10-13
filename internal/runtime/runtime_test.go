@@ -465,3 +465,36 @@ func TestLoadModel_NonOllamaRecipe_DoesNotPull(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// A node with no route to a registry can only start an image it already has.
+func TestLoadModel_SkipsPullWhenImageIsPresent(t *testing.T) {
+	fc := fake.New()
+	fc.ImagesPresent = []string{samplePlan("dep-1").Image}
+	// Any pull would fail, as it does on a node with no egress.
+	fc.PullErr = errors.New("no route to registry")
+	rt := newRT(t, fc, okProbe)
+
+	if _, err := rt.LoadModel(context.Background(), "dep-1", samplePlan("dep-1")); err != nil {
+		t.Fatalf("a present image should start without a pull: %v", err)
+	}
+	if len(fc.Pulled) != 0 {
+		t.Errorf("pull was attempted for an image already on the node: %v", fc.Pulled)
+	}
+	if len(fc.Created) != 1 {
+		t.Errorf("expected the container to be created, got %d", len(fc.Created))
+	}
+}
+
+// A failure to check must not block a start that would otherwise work.
+func TestLoadModel_ImageExistsErrorFallsBackToPull(t *testing.T) {
+	fc := fake.New()
+	fc.ImageExistsErr = errors.New("docker daemon hiccup")
+	rt := newRT(t, fc, okProbe)
+
+	if _, err := rt.LoadModel(context.Background(), "dep-1", samplePlan("dep-1")); err != nil {
+		t.Fatalf("expected the pull path to still run: %v", err)
+	}
+	if len(fc.Pulled) != 1 {
+		t.Errorf("expected one pull, got %d", len(fc.Pulled))
+	}
+}
