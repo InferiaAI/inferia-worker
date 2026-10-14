@@ -202,19 +202,30 @@ func (r *Runtime) LoadModel(ctx context.Context, deploymentID string, plan recip
 	// Pull. Surface progress as deployment logs (visible in the dashboard's
 	// terminal while the container does not yet exist).
 	r.setState(deploymentID, StatePulling)
-	d.prog.append("Pulling image " + plan.Image + " …")
-	pullCtx, cancel := context.WithTimeout(ctx, r.cfg.PullTimeout)
-	if err := r.cfg.Docker.Pull(pullCtx, plan.Image, func(line string) {
-		d.prog.append(line)
-	}); err != nil {
-		cancel()
-		d.prog.append("Failed: pull: " + err.Error())
-		d.prog.markFailed()
-		r.setState(deploymentID, StateFailed)
-		r.drop(deploymentID)
-		return nil, fmt.Errorf("pull: %w", err)
+	// An image already here needs no registry, which is the only way a node
+	// with no egress can start one. Matches image_pull_policy: IfNotPresent
+	// on the Kubernetes path.
+	present, err := r.cfg.Docker.ImageExists(ctx, plan.Image)
+	if err != nil {
+		d.prog.append("Could not check for a local " + plan.Image + ": " + err.Error())
 	}
-	cancel()
+	if present {
+		d.prog.append("Image " + plan.Image + " is already on this node.")
+	} else {
+		d.prog.append("Pulling image " + plan.Image + " …")
+		pullCtx, cancel := context.WithTimeout(ctx, r.cfg.PullTimeout)
+		if err := r.cfg.Docker.Pull(pullCtx, plan.Image, func(line string) {
+			d.prog.append(line)
+		}); err != nil {
+			cancel()
+			d.prog.append("Failed: pull: " + err.Error())
+			d.prog.markFailed()
+			r.setState(deploymentID, StateFailed)
+			r.drop(deploymentID)
+			return nil, fmt.Errorf("pull: %w", err)
+		}
+		cancel()
+	}
 	d.prog.append("Image ready. Creating container…")
 
 	// Create + start.

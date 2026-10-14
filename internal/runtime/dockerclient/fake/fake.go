@@ -19,13 +19,15 @@ type Client struct {
 	Pinged          int
 	NetworksCreated []string
 	Pulled          []string
+	// ImagesPresent is what ImageExists reports as already on the node.
+	ImagesPresent []string
 	// PullProgressLines, when set, are replayed to Pull's onProgress callback.
 	PullProgressLines []string
-	Created         []*dockerclient.ContainerSpec
-	Started         []string
-	Stopped         []string
-	Removed         []string
-	RemovedByName   []string
+	Created           []*dockerclient.ContainerSpec
+	Started           []string
+	Stopped           []string
+	Removed           []string
+	RemovedByName     []string
 
 	// containers maps containerID → inspect state, mutated by Start/Stop/Remove
 	// and read by Inspect.
@@ -43,6 +45,7 @@ type Client struct {
 	PingErr          error
 	EnsureNetworkErr error
 	PullErr          error
+	ImageExistsErr   error
 	CreateErr        error
 	StartErr         error
 	StopErr          error
@@ -78,6 +81,21 @@ func (c *Client) EnsureNetwork(ctx context.Context, name string) error {
 	}
 	c.NetworksCreated = append(c.NetworksCreated, name)
 	return nil
+}
+
+// ImagesPresent are the images ImageExists reports as already on the node.
+func (c *Client) ImageExists(ctx context.Context, image string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ImageExistsErr != nil {
+		return false, c.ImageExistsErr
+	}
+	for _, p := range c.ImagesPresent {
+		if p == image {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *Client) Pull(ctx context.Context, image string, onProgress func(line string)) error {

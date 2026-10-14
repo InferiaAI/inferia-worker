@@ -23,6 +23,9 @@ type Client interface {
 	// human-readable progress lines (e.g. "Pulling image… 42% (14.7 GB / 35.0 GB)")
 	// so callers can surface pull progress as logs. Pass nil to ignore progress.
 	Pull(ctx context.Context, image string, onProgress func(line string)) error
+	// ImageExists reports whether the image is already on this node, so a node
+	// with no route to a registry can still start a deployment.
+	ImageExists(ctx context.Context, image string) (bool, error)
 	Create(ctx context.Context, spec *ContainerSpec) (containerID string, err error)
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeoutSeconds int) error
@@ -117,6 +120,16 @@ func (e *dockerEngine) EnsureNetwork(ctx context.Context, name string) error {
 		return nil
 	}
 	return nil
+}
+
+func (e *dockerEngine) ImageExists(ctx context.Context, img string) (bool, error) {
+	if _, err := e.cli.ImageInspect(ctx, img); err != nil {
+		if client.IsErrNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (e *dockerEngine) Pull(ctx context.Context, img string, onProgress func(line string)) error {
