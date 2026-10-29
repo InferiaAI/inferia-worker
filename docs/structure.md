@@ -37,6 +37,7 @@ Parses env vars at startup. Validates required fields, URL schemes, length bound
 ### `internal/auth`
 - Token store: in-memory + persisted to `${TOKEN_FILE}` (default `/var/lib/inferia-worker/token`).
 - Inference middleware: `Authorization: Bearer <INFERENCE_TOKEN>`, constant-time compare via `crypto/subtle`.
+- Direct `/v1/logs` and `/v1/shell` on the HTTP port are off unless `ENABLE_DIRECT_ADMIN_WS=true`; the control plane reaches logs and shell over the control channel.
 
 ### `internal/runtime`
 - `Launcher` interface: `LoadModel`, `UnloadModel`, `LoadedDeployments`, `StatusOf`.
