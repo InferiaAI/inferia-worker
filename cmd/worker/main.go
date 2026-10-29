@@ -155,7 +155,12 @@ func main() {
 	// path can spawn sessions on demand (the CP-driven dashboard route
 	// uses these; the admin handlers do their own resolution chain).
 	if raw, ok := docker.(dockerclient.RawAccessor); ok {
-		admin.Register(app, raw.Raw(), rt)
+		// Opt-in: the dashboard goes through the control channel, and these
+		// routes would give a shell to anyone holding the pool's inference token.
+		if cfg.DirectAdminWS {
+			admin.Register(app, raw.Raw(), rt)
+			log.Printf("admin endpoints: direct /v1/logs and /v1/shell enabled (ENABLE_DIRECT_ADMIN_WS)")
+		}
 		shellbridge.SetDockerClient(raw.Raw(), rt)
 		shellbridge.SetDockerLogsBackend(raw.Raw(), rt)
 		// Host-shell mode: untargeted ShellOpen frames (empty deployment_id

@@ -25,6 +25,9 @@ type Config struct {
 	DockerHost         string
 	ModelsNetwork      string
 	LogLevel           string
+	// DirectAdminWS mounts /v1/logs and /v1/shell on the HTTP port. The control
+	// plane uses the control channel; these trust only INFERENCE_TOKEN.
+	DirectAdminWS bool
 
 	PullTimeoutSeconds       int
 	ReadinessTimeoutSeconds  int
@@ -63,6 +66,15 @@ var (
 	nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
+// isTrue reads an opt-in flag: only an explicit yes turns it on.
+func isTrue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 // Getter reads a single env-style key; missing keys return "".
 type Getter func(string) string
 
@@ -87,6 +99,7 @@ func LoadFrom(getenv Getter) (*Config, error) {
 		DockerHost:         firstNonEmpty(getenv("DOCKER_HOST"), defaultDockerHost),
 		ModelsNetwork:      firstNonEmpty(getenv("MODELS_NETWORK"), defaultModelsNet),
 		LogLevel:           firstNonEmpty(getenv("LOG_LEVEL"), defaultLogLevel),
+		DirectAdminWS:      isTrue(getenv("ENABLE_DIRECT_ADMIN_WS")),
 	}
 
 	var errs []string

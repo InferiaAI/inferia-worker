@@ -303,3 +303,21 @@ func TestLoad_ReadsFromOSEnv(t *testing.T) {
 		t.Errorf("Load NodeName: %q", cfg.NodeName)
 	}
 }
+
+func TestLoadFrom_DirectAdminWSIsOptIn(t *testing.T) {
+	cases := map[string]bool{"": false, "false": false, "0": false, "no": false,
+		"on-ish": false, "true": true, "TRUE": true, "1": true, "yes": true}
+	for value, want := range cases {
+		env := baseEnv()
+		if value != "" {
+			env["ENABLE_DIRECT_ADMIN_WS"] = value
+		}
+		cfg, err := LoadFrom(env.Get)
+		if err != nil {
+			t.Fatalf("%q: %v", value, err)
+		}
+		if cfg.DirectAdminWS != want {
+			t.Errorf("ENABLE_DIRECT_ADMIN_WS=%q: got %v, want %v", value, cfg.DirectAdminWS, want)
+		}
+	}
+}
